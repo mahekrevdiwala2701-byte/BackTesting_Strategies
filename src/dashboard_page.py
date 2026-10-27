@@ -77,7 +77,11 @@ def render_dashboard_page(asset_dfs, fetch_errors):
         note("No data in the selected period. Pick a different period in the sidebar.", AMBER, "⚠️")
         return
 
-    t1, t2, t3 = st.tabs(["📈 Technical analysis", "🔗 Compare & correlate", "📥 Data inspector"])
+    labels = ["📈 Technical analysis", "🔗 Compare & correlate", "📥 Data inspector"]
+    try:                                                # open "Compare & correlate" first
+        t1, t2, t3 = st.tabs(labels, default=labels[1])
+    except TypeError:                                   # older Streamlit without `default`
+        t2, t1, t3 = st.tabs([labels[1], labels[0], labels[2]])
     with t1:
         _technical_tab(asset_dfs, available, start_ts, end_ts)
     with t2:
@@ -149,12 +153,6 @@ def _asset_tab(name, asset_dfs, period_dfs, fetch_errors, start_date, end_date):
     table, fmt = blank_missing(table, fmt)
     styler = style_change_cols(table.style.format(fmt), ['Change (₹)', 'Change (%)'])
     st.dataframe(styler, width="stretch", height=380)
-
-    export = d[cols].sort_values('Date', ascending=False).reset_index(drop=True)
-    export['Date'] = export['Date'].dt.strftime('%Y-%m-%d')
-    st.download_button(f"⬇️  Download {ASSET_SHORT[name]} data (CSV)", export.to_csv(index=False).encode('utf-8'),
-                       file_name=f"{name.lower()}_{start_date:%Y%m%d}_{end_date:%Y%m%d}.csv", mime="text/csv",
-                       key=f"dl_{name}")
 
 
 # =========================================================

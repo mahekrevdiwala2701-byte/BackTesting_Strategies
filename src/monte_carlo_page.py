@@ -398,9 +398,6 @@ def _combos_explorer(mode, pooled, paths, combos, combo_list, bh_ref, mine):
         st.dataframe(tbl.style.format({**{c: '₹{:,.0f}' for c in money}, **{c: '{:.2f}%' for c in pct_cols},
                                        **{c: '{:g}%' for c in asset_cols}}),
                      width="stretch", hide_index=True, height=440)
-        st.download_button("⬇️  Download every mix (CSV)", tbl.to_csv(index=False).encode('utf-8-sig'),
-                           file_name=f"monte_carlo_{mode}_all_combinations.csv", mime="text/csv",
-                           key=f"dl_{mode}_combos")
 
 
 def _best_cards(best_med, best_p5, least, worst, label):
@@ -475,8 +472,6 @@ def _diff_explorer(pooled, paths, combos, sets, bh, mine):
         pct_cols = [c for c in tbl.columns if '(%)' in c]
         st.dataframe(tbl.style.format({**{c: '₹{:,.0f}' for c in money}, **{c: '{:.2f}%' for c in pct_cols}}),
                      width="stretch", hide_index=True, height=440)
-        st.download_button("⬇️  Download every combination (CSV)", tbl.to_csv(index=False).encode('utf-8-sig'),
-                           file_name="monte_carlo_different_weights_all.csv", mime="text/csv", key="dl_diff_combos")
 
 
 # =========================================================

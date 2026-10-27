@@ -332,8 +332,6 @@ def _render_weight_decisions(decisions, lookback_label):
     styler = show.style.format(dfmt)
     st.dataframe(style_change_cols(styler, ['Growth (%)']), width="stretch", hide_index=True,
                  height=min(420, 38 + 35 * len(show)))
-    st.download_button("⬇️  Download weight decisions (CSV)", show.to_csv(index=False).encode('utf-8-sig'),
-                       file_name="weight_decisions.csv", mime="text/csv")
 
 
 def _render_rebalance_data(schedule, trade_log, used, prices, units_df, values, current,
