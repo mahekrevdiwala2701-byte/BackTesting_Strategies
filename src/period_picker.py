@@ -22,7 +22,7 @@ def today_ist():
     return datetime.now(IST).date()
 
 
-def period_selector(asset_dfs, default_preset="1 Year", key="main"):
+def period_selector(asset_dfs, default_preset="Custom Range", key="main"):
     """Draws the period controls in the sidebar and returns (start_date, end_date).
     The end date never goes past today, even if the sheet has future-dated rows.
     Custom Range = pick a From date and a To date on a calendar."""

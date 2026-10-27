@@ -5,8 +5,9 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from src.ui import (
-    PLOT_LAYOUT, VIOLET, CYAN, AMBER, PINK, EMERALD, BLUE, BAD, GOOD, FAINT, SURFACE,
-    hero, section, kpi, kpi_row, tone_of, chips, note, chart, hex_rgba, inr, pct,
+    panel,
+    PLOT_LAYOUT, VIOLET, CYAN, AMBER, PINK, EMERALD, BLUE, BAD, GOOD, FAINT, SURFACE, TEXT, MUTED,
+    hero, ticker, section, kpi, kpi_row, tone_of, note, chart, hex_rgba, inr, pct,
     sidebar_nav, sidebar_footer,
 )
 from src.analytics import compute_technical_indicators, calculate_performance_metrics
@@ -18,7 +19,7 @@ from src.period_picker import period_selector
 def render_dashboard_page(asset_dfs, fetch_errors):
     # ---------------- Sidebar ----------------
     sidebar_nav("dashboard")
-    start_date, end_date = period_selector(asset_dfs, key="main")
+    start_date, end_date = period_selector(asset_dfs, default_preset="Custom Range", key="main")
     sidebar_footer(fetch_errors, key="main")
 
     start_ts, end_ts = pd.Timestamp(start_date), pd.Timestamp(end_date)
@@ -27,13 +28,28 @@ def render_dashboard_page(asset_dfs, fetch_errors):
     last_date = max(df['Date'].max() for df in asset_dfs.values())
 
     # ---------------- Hero ----------------
+    hero_line = None
+    for n in ('LargeCap', 'MidCap', 'Gold', 'SmallCap'):
+        if n in period_dfs and len(period_dfs[n]) > 5:
+            hero_line = period_dfs[n]['Close'].to_numpy()
+            break
     hero("Multi-Asset Market Dashboard",
          "GoldBEES, Nifty 50, MidCap and SmallCap side by side: prices, trends, correlations and raw data, "
          "synced live from Google Sheets.",
          page="dashboard", eyebrow="Live overview",
          chips=[f"📅 {start_date:%d %b %Y} → {end_date:%d %b %Y}",
                 f"🧩 {len(asset_dfs)} of {len(ASSETS)} assets loaded",
-                f"🕒 Latest data {last_date:%d %b %Y}"])
+                f"🕒 Latest data {last_date:%d %b %Y}"], line=hero_line)
+
+    # ---------------- Ticker tape ----------------
+    tape = []
+    for n in ASSETS:
+        if n in asset_dfs and len(asset_dfs[n]) > 1:
+            full = asset_dfs[n]
+            chg = full['Change (%)'].iloc[-1]
+            tape.append((ASSET_SHORT[n], inr(full['Close'].iloc[-1], 2), 0.0 if pd.isna(chg) else chg, COLORS[n]))
+    if tape:
+        ticker(tape)
 
     # ---------------- Snapshot row ----------------
     section("Snapshot", "Latest price and change over the selected period", "⚡", VIOLET)
@@ -47,7 +63,7 @@ def render_dashboard_page(asset_dfs, fetch_errors):
             first, last = d['Close'].iloc[0], d['Close'].iloc[-1]
             chg = (last / first - 1) * 100 if first else 0.0
             kpi(ASSET_SHORT[name], inr(last, 2), f"{chg:+.2f}% in period", tone_of(chg),
-                ASSET_ICONS[name], COLORS[name])
+                ASSET_ICONS[name], COLORS[name], spark=d['Close'].to_numpy())
 
     # ---------------- Per-asset tabs ----------------
     section("Asset deep-dive", "Price history, daily moves and every record for one asset", "🔍", CYAN)
@@ -116,8 +132,8 @@ def _asset_tab(name, asset_dfs, period_dfs, fetch_errors, start_date, end_date):
     fig.update_yaxes(range=[lo - pad, hi + pad], tickprefix="₹", row=1, col=1)
     fig.update_yaxes(ticksuffix="%", row=2, col=1)
     fig.update_layout(**PLOT_LAYOUT, height=540, showlegend=False, hovermode='x unified')
-    fig.update_annotations(font=dict(size=13, color="#C7CEE3"))
-    with st.container(border=True):
+    fig.update_annotations(font=dict(size=13, color=MUTED))
+    with panel():
         chart(fig, key=f"price_{name}")
 
     st.markdown(f"**📋 All records** · {first['Date']:%d %b %Y} to {latest['Date']:%d %b %Y} · {len(d):,} rows")
@@ -193,17 +209,23 @@ def _technical_tab(asset_dfs, available, start_ts, end_ts):
     fig.update_yaxes(tickprefix="₹", row=1, col=1)
     fig.update_yaxes(range=[0, 100], row=2, col=1)
     fig.update_yaxes(ticksuffix="%", row=3, col=1)
-    fig.update_annotations(font=dict(size=13, color="#C7CEE3"))
+    fig.update_annotations(font=dict(size=13, color=MUTED))
     fig.update_layout(**PLOT_LAYOUT, height=720, hovermode='x unified',
                       legend=dict(orientation='h', yanchor='bottom', y=1.04, x=0))
-    with st.container(border=True):
+    with panel():
         chart(fig, key="ta_chart")
     st.caption("RSI above 70 (red zone) = overbought, below 30 (green zone) = oversold. "
                "Moving averages are computed on the full history, so they are ready from the first day.")
 
 
 def _compare_tab(period_dfs, available):
-    chips([(ASSET_SHORT[n], COLORS[n]) for n in available])
+    picked = st.pills("Assets to compare (click to switch on / off)", options=available, selection_mode="multi",
+                      default=available, format_func=lambda n: f"{ASSET_ICONS[n]} {ASSET_SHORT[n]}",
+                      key="cmp_assets")
+    available = [n for n in available if n in (picked or [])]
+    if not available:
+        note("Switch on at least one asset above to compare.", AMBER, "👆")
+        return
     fig = go.Figure()
     for n in available:
         d = period_dfs[n]
@@ -212,7 +234,7 @@ def _compare_tab(period_dfs, available):
     fig.add_hline(y=100, line_dash="dot", line_color=FAINT)
     fig.update_layout(**PLOT_LAYOUT, title="Growth of 100 (every asset rebased to 100 on day one)", height=460,
                       hovermode='x unified', legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0.45))
-    with st.container(border=True):
+    with panel():
         chart(fig, key="cmp_norm")
 
     c1, c2 = st.columns([1.15, 1])
@@ -247,7 +269,7 @@ def _compare_tab(period_dfs, available):
                 z=corr.values, x=corr.columns, y=corr.index, zmin=-1, zmax=1, xgap=3, ygap=3,
                 colorscale=[[0, BAD], [0.5, SURFACE], [1, CYAN]],
                 text=[[f"{v:.2f}" if pd.notna(v) else "" for v in row] for row in corr.values],
-                texttemplate="%{text}", textfont=dict(size=14, color="#fff"),
+                texttemplate="%{text}", textfont=dict(size=14, color=TEXT),
                 hovertemplate="%{y} vs %{x}: %{z:.2f}<extra></extra>", colorbar=dict(thickness=12)))
             fig_c.update_layout(**PLOT_LAYOUT, height=420, yaxis=dict(autorange='reversed'),
                                 margin=dict(l=10, r=10, t=20, b=10))

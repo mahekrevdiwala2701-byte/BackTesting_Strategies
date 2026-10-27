@@ -22,6 +22,7 @@ from src.monte_carlo_page import render_monte_carlo_page  # noqa: E402
 from src.everyday_portfolio_page import render_everyday_portfolio_page  # noqa: E402
 
 apply_custom_css()
+st.session_state["_panel_n"] = 0      # panel() numbering starts fresh every run
 
 # ---------------------------------------------------------
 # Data

@@ -5,6 +5,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from src.ui import (
+    panel,
     PLOT_LAYOUT, STRAT_COLORS, VIOLET, CYAN, EMERALD, AMBER, BLUE, BAD, FAINT, TEXT, MUTED,
     hero, section, kpi_row, tone_of, note, explain, chart, hex_rgba, inr, inr_short, pct,
     sidebar_nav, sidebar_footer,
@@ -47,7 +48,7 @@ def _short(name):
 def render_investment_page(asset_dfs, fetch_errors):
     # ---------------- Sidebar ----------------
     sidebar_nav("invest")
-    start_date, end_date = period_selector(asset_dfs, default_preset="1 Year", key="invest")
+    start_date, end_date = period_selector(asset_dfs, default_preset="Custom Range", key="invest")
     sidebar_footer(fetch_errors, key="invest")
 
     # ---------------- Hero ----------------
@@ -259,10 +260,10 @@ def render_investment_page(asset_dfs, fetch_errors):
     pad = (hi_t - lo_t) * 0.08 or invested * 0.02
     fig.update_yaxes(tickprefix="₹", tickformat=",.0f")
     fig.update_yaxes(range=[lo_t - pad, hi_t + pad], row=1, col=1)
-    fig.update_annotations(font=dict(size=13, color="#C7CEE3"))
+    fig.update_annotations(font=dict(size=13, color=MUTED))
     fig.update_layout(**PLOT_LAYOUT, height=640, hovermode='x unified',
                       legend=dict(orientation='h', yanchor='bottom', y=1.04, xanchor='right', x=1))
-    with st.container(border=True):
+    with panel():
         chart(fig, key="inv_main")
     st.caption("Bottom panel: the ₹ value of each asset inside your portfolio; together they add up to the total "
                "above. Click a legend item to hide / show it.")
@@ -275,7 +276,7 @@ def render_investment_page(asset_dfs, fetch_errors):
     fig_w.update_layout(**PLOT_LAYOUT, title="Actual weight of each asset over time (%)", height=340,
                         hovermode='x unified', yaxis=dict(ticksuffix="%", range=[0, 100]),
                         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
-    with st.container(border=True):
+    with panel():
         chart(fig_w, key="inv_weights")
 
     # ---------------- Breakdown table ----------------

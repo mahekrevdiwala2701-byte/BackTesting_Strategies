@@ -17,7 +17,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.ui import (
-    PLOT_LAYOUT, VIOLET, CYAN, EMERALD, AMBER, BLUE, BAD, FAINT,
+    panel,
+    PLOT_LAYOUT, VIOLET, CYAN, EMERALD, AMBER, BLUE, BAD, FAINT, INK, PINK, MUTED, hex_rgba,
     hero, section, kpi, kpi_row, tone_of, note, chart, inr, inr_short, pct as fmt_pct,
     sidebar_nav, sidebar_footer, sidebar_label, weight_badge,
 )
@@ -25,7 +26,8 @@ from src.asset_data import ASSETS, ASSET_LABELS, ASSET_SHORT, ASSET_ICONS, COLOR
 from src.period_picker import today_ist
 
 DEFAULT_START = date(2015, 1, 1)
-PORTFOLIO_COLOR = "#FFFFFF"
+PORTFOLIO_COLOR = INK
+ROLL_WINDOWS = {"1 Year": 1, "3 Years": 3, "5 Years": 5}
 
 
 # ---------------------------------------------------------
@@ -68,6 +70,42 @@ def yoy_chain(prices: pd.Series, start, end) -> pd.DataFrame:
     yoy[base] = np.nan
     return pd.DataFrame({'Close': p, 'Prev Year Close': prev.where(~base),
                          'YoY (%)': yoy * 100, 'Index Value': value, 'Year No.': year_idx})
+
+
+def drop_glitches(prices: pd.Series, limit: float = 0.5):
+    """Remove obvious data-entry errors: a run of prices that jumps more than `limit` (50%) away from the last
+    good price and later comes back to it (e.g. GoldBEES prices pasted into the Nifty sheet for a few months).
+    A jump that never comes back is treated as real and kept. Returns (clean series, rows removed)."""
+    s = prices.dropna().sort_index()
+    vals = s.to_numpy(dtype=float)
+    bad = np.zeros(len(vals), dtype=bool)
+    if len(vals):
+        last_good, run = vals[0], []
+        for i in range(1, len(vals)):
+            if abs(vals[i] / last_good - 1) > limit:
+                run.append(i)
+            else:
+                if run:
+                    bad[run] = True
+                last_good, run = vals[i], []
+    return s[~bad], int(bad.sum())
+
+
+def rolling_return(series: pd.Series, years: int) -> pd.Series:
+    """Return over the `years` before every date, in %: value(d) / value(same day `years` earlier) − 1.
+    If that earlier day was a holiday, the last trading day before it is used. Windows longer than one
+    year are annualised (CAGR), so 1-, 3- and 5-year numbers can be compared directly."""
+    s = series.dropna().sort_index()
+    s = s[~s.index.duplicated(keep='last')]
+    if s.empty:
+        return pd.Series(dtype=float)
+    back = s.index - pd.DateOffset(years=years)
+    pos = s.index.searchsorted(back, side='right') - 1
+    ok = pos >= 0
+    prev = np.where(ok, s.values[np.clip(pos, 0, None)], np.nan)
+    growth = s.values / prev
+    r = growth ** (1 / years) - 1 if years > 1 else growth - 1
+    return pd.Series(np.where(ok, r * 100, np.nan), index=s.index)
 
 
 def value_one_year_ago(s: pd.Series, d: pd.Timestamp):
@@ -216,8 +254,11 @@ def render_everyday_portfolio_page(asset_dfs, fetch_errors):
         fig.update_yaxes(tickprefix="₹", tickformat=",.0f")
     else:
         fig.update_yaxes(ticksuffix="%")
-    with st.container(border=True):
+    with panel():
         chart(fig, key="ep_chart")
+
+    # ---------------- Rolling returns ----------------
+    rolling = _rolling_section(asset_dfs, results, portfolio, start, end)
 
     # ---------------- Holdings summary ----------------
     section("Holdings", "Latest YoY = change versus the same day last year", "📋", AMBER)
@@ -260,7 +301,7 @@ def render_everyday_portfolio_page(asset_dfs, fetch_errors):
     fig_ye.update_layout(**PLOT_LAYOUT, barmode='stack', height=340, title="Year-end value, stacked by holding",
                          yaxis=dict(tickprefix="₹", tickformat=",.0f"), hovermode='x unified',
                          legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
-    with st.container(border=True):
+    with panel():
         chart(fig_ye, key="ep_ye")
 
     ye_show = ye.apply(lambda col: col.map(money))
@@ -268,7 +309,7 @@ def render_everyday_portfolio_page(asset_dfs, fetch_errors):
     st.dataframe(ye_show, width="stretch", hide_index=True)
 
     # ---------------- One combined table + CSV ----------------
-    section("All indices, day by day", "Close, previous-year close, YoY %, chained index value and holding",
+    section("All indices, day by day", "Close, previous-year close, YoY %, index value, holding and rolling return",
             "📥", CYAN)
     combined = pd.DataFrame(index=holdings.index)
     for a, res in results.items():
@@ -280,6 +321,8 @@ def render_everyday_portfolio_page(asset_dfs, fetch_errors):
         combined[f"{lab} Index Value"] = r['Index Value']
         combined[f"{lab} Holding (₹)"] = holdings[a]
     combined["Total Portfolio (₹)"] = portfolio
+    for lab, ser in rolling['series'].items():
+        combined[f"{lab} Rolling {rolling['label']} Return (%)"] = ser.reindex(holdings.index)
     combined["Portfolio Day Change (₹)"] = portfolio.diff()
 
     show = combined.sort_index(ascending=False)
@@ -295,3 +338,103 @@ def render_everyday_portfolio_page(asset_dfs, fetch_errors):
     st.download_button("⬇️  Download all indices + portfolio (CSV)", export.to_csv().encode('utf-8-sig'),
                        file_name=f"everyday_portfolio_{start:%Y%m%d}_{end:%Y%m%d}.csv", mime="text/csv",
                        key="ep_dl")
+
+
+# ---------------------------------------------------------
+# Rolling returns section
+# ---------------------------------------------------------
+def _rolling_section(asset_dfs, results, portfolio, start, end):
+    section("Rolling returns", "The return over every window ending on each day: how often, and by how much, "
+            "each index made money", "🔁", PINK)
+    win_label = st.radio("Window", list(ROLL_WINDOWS), index=0, horizontal=True, key="ep_roll",
+                         label_visibility="collapsed")
+    yrs = ROLL_WINDOWS[win_label]
+    unit = "" if yrs == 1 else " a year"
+    s_ts, e_ts = pd.Timestamp(start), pd.Timestamp(end)
+
+    series, removed = {}, {}
+    for a in results:                                   # actual index prices, full history for the look-back
+        clean, n_bad = drop_glitches(asset_dfs[a].set_index('Date')['Close'])
+        if n_bad:
+            removed[ASSET_SHORT[a]] = n_bad
+        r = rolling_return(clean, yrs)
+        series[ASSET_SHORT[a]] = r[(r.index >= s_ts) & (r.index <= e_ts)].dropna()
+    port_r = rolling_return(portfolio, yrs).dropna()
+    series['Portfolio'] = port_r
+    colors = {**{ASSET_SHORT[a]: COLORS[a] for a in results}, 'Portfolio': INK}
+    icons = {**{ASSET_SHORT[a]: ASSET_ICONS[a] for a in results}, 'Portfolio': '💼'}
+    shown = {k: v for k, v in series.items() if len(v)}
+
+    if not shown:
+        note(f"Not enough history yet: a {win_label.lower()} rolling return needs at least {win_label.lower()} "
+             "of data before each day.", AMBER, "⏳")
+        return {'series': {}, 'label': win_label}
+
+    note(f"<b>What this shows:</b> for every day, the return you would have made if you had bought exactly "
+         f"{win_label.lower()} earlier{' (shown as a yearly average, CAGR)' if yrs > 1 else ''}. "
+         "It answers <b>“how often did a holding period like this make money?”</b> without depending on "
+         "one lucky or unlucky start date.", PINK, "💡")
+
+    if removed:
+        note("Ignored price rows that look like data-entry errors (more than 50% away from the surrounding prices): "
+             + ", ".join(f"<b>{k}</b> {n} row{'s' if n != 1 else ''}" for k, n in removed.items())
+             + ". Fix them in the Google Sheet to include them.", AMBER, "🧹")
+
+    # cards: latest value per index, with the history as a sparkline
+    cards = []
+    for k, v in shown.items():
+        pos_share = (v > 0).mean() * 100
+        cards.append(dict(label=k, value=f"{v.iloc[-1]:+.1f}%{unit}",
+                          delta=f"avg {v.mean():+.1f}% · {pos_share:.0f}% up",
+                          tone="good" if v.iloc[-1] >= 0 else "bad", icon=icons[k], accent=colors[k],
+                          spark=v.to_numpy()))
+    kpi_row(cards)
+
+    # line chart
+    fig = go.Figure()
+    for k, v in shown.items():
+        is_p = k == 'Portfolio'
+        fig.add_trace(go.Scatter(x=v.index, y=v.values, name=k,
+                                 line=dict(color=colors[k], width=3 if is_p else 1.8, dash='dot' if is_p else 'solid'),
+                                 hovertemplate="%{y:+.1f}%"))
+    lo = min(v.min() for v in shown.values())
+    if lo < 0:
+        fig.add_hrect(y0=lo * 1.1, y1=0, fillcolor=hex_rgba(BAD, 0.05), line_width=0)
+    fig.add_hline(y=0, line_color=FAINT, line_width=1.5)
+    fig.update_layout(**PLOT_LAYOUT, height=500, hovermode='x unified',
+                      title=f"Rolling {win_label.lower()} return (%{unit})",
+                      yaxis=dict(ticksuffix="%"),
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
+    with panel():
+        chart(fig, key="ep_roll_chart")
+
+    c1, c2 = st.columns([1, 1.25])
+    with c1:
+        box = go.Figure()
+        for k, v in shown.items():
+            box.add_trace(go.Box(x=v.values, name=k, marker_color=colors[k], boxmean=True, orientation='h',
+                                 line=dict(width=1.6), fillcolor=hex_rgba(colors[k] if k != 'Portfolio' else MUTED, 0.25),
+                                 boxpoints=False, hovertemplate="%{x:+.1f}%<extra>" + k + "</extra>"))
+        box.add_vline(x=0, line_color=FAINT)
+        box.update_layout(**PLOT_LAYOUT, height=380, showlegend=False, title="Range of rolling returns",
+                          xaxis=dict(ticksuffix="%"), yaxis=dict(autorange='reversed'))
+        with panel():
+            chart(box, key="ep_roll_box")
+        st.caption("Box = middle half of all windows · line = median · dashed = average · whiskers = typical extremes.")
+    with c2:
+        rows = []
+        for k, v in shown.items():
+            rows.append({'Index': f"{icons[k]} {k}", 'Latest (%)': v.iloc[-1], 'Average (%)': v.mean(),
+                         'Median (%)': v.median(), 'Best (%)': v.max(), 'Best window ends': v.idxmax().strftime('%d-%m-%Y'),
+                         'Worst (%)': v.min(), 'Worst window ends': v.idxmin().strftime('%d-%m-%Y'),
+                         'Positive (% of windows)': (v > 0).mean() * 100,
+                         'Above 10% (% of windows)': (v > 10).mean() * 100})
+        tbl = pd.DataFrame(rows)
+        num = [c for c in tbl.columns if '(%)' in c]
+        st.dataframe(style_change_cols(tbl.style.format({c: '{:+.2f}%' for c in num if 'windows' not in c}
+                                                        | {c: '{:.1f}%' for c in num if 'windows' in c}),
+                                       ['Latest (%)', 'Average (%)', 'Median (%)', 'Best (%)', 'Worst (%)']),
+                     width="stretch", hide_index=True)
+        st.caption(f"Index rows use actual prices; the portfolio row uses your portfolio's value. "
+                   f"{sum(len(v) for v in shown.values()):,} windows in total.")
+    return {'series': series, 'label': win_label}
