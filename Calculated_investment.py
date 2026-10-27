@@ -186,32 +186,45 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ---------------------------------------------------------
 # Charts
 # ---------------------------------------------------------
-left, right = st.columns([2, 1])
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=values.index, y=values['Total'], name='Total Portfolio',
+                         line=dict(color='#A855F7', width=3)))
+for name in value_series:
+    fig.add_trace(go.Scatter(x=values.index, y=values[name], name=f"{ASSET_LABELS[name]} (holding)",
+                             line=dict(color=COLORS[name], width=2)))
+fig.add_hline(y=invested, line_dash="dash", line_color="#94A3B8",
+              annotation_text=f"Invested ₹{invested:,.0f}", annotation_position="top left")
+fig.update_layout(**PLOT_LAYOUT, title="Total Portfolio & Each Index Holding Over Time (₹)", height=520,
+                  hovermode='x unified', yaxis=dict(tickprefix="₹", tickformat=",.0f"),
+                  legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+st.plotly_chart(fig, use_container_width=True)
 
-with left:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=values.index, y=values['Total'], name='Total Value',
-                             line=dict(color='#A855F7', width=3)))
-    for name in value_series:
-        fig.add_trace(go.Scatter(x=values.index, y=values[name], name=ASSET_LABELS[name],
-                                 line=dict(color=COLORS[name], width=1.5, dash='dot')))
-    fig.add_hline(y=invested, line_dash="dash", line_color="#94A3B8",
-                  annotation_text=f"Invested ₹{invested:,.0f}", annotation_position="top left")
-    fig.update_layout(**PLOT_LAYOUT, title="Investment Value Over Time (₹)", height=450,
-                      hovermode='x unified', yaxis=dict(tickprefix="₹"))
-    st.plotly_chart(fig, use_container_width=True)
+# ---------------------------------------------------------
+# Day-by-day change of all 4 indices + portfolio
+# ---------------------------------------------------------
+names = list(value_series.keys())
+day_px = pd.concat({n: period_dfs[n].set_index('Date')['Close'] for n in names}, axis=1).sort_index()
+day_px = day_px[~day_px.index.duplicated(keep='last')].reindex(values.index).ffill()
+daily_tbl = pd.DataFrame(index=values.index)
+for n in names:
+    s = ASSET_LABELS[n].split(' ', 1)[1]
+    daily_tbl[f'{s} Price (₹)'] = day_px[n]
+    daily_tbl[f'{s} Day Change (%)'] = day_px[n].pct_change(fill_method=None) * 100
+    daily_tbl[f'{s} Holding (₹)'] = values[n]
+    daily_tbl[f'{s} Day P&L (₹)'] = values[n].diff()
+daily_tbl['Portfolio Value (₹)'] = values['Total']
+daily_tbl['Portfolio Day P&L (₹)'] = values['Total'].diff()
+daily_tbl['Portfolio Day Change (%)'] = values['Total'].pct_change() * 100
 
-with right:
-    pie_df = pd.DataFrame({
-        'Asset': [ASSET_LABELS[n] for n in value_series],
-        'Current Value': [values[n].iloc[-1] for n in value_series],
-    })
-    fig_pie = px.pie(pie_df, names='Asset', values='Current Value', hole=0.5,
-                     color='Asset', color_discrete_map={ASSET_LABELS[k]: v for k, v in COLORS.items()},
-                     title="Current Allocation")
-    fig_pie.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', height=450,
-                          margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation='h'))
-    st.plotly_chart(fig_pie, use_container_width=True)
+st.markdown("### 📅 Day-by-Day Change: All 4 Indices + Portfolio")
+show_daily = daily_tbl.sort_index(ascending=False).reset_index()
+show_daily = show_daily.rename(columns={show_daily.columns[0]: 'Date'})
+show_daily['Date'] = pd.to_datetime(show_daily['Date']).dt.strftime('%d-%m-%Y')
+fmt = {c: ('{:+.2f}%' if c.endswith('(%)') else '₹{:+,.2f}' if 'P&L' in c else '₹{:,.2f}')
+       for c in show_daily.columns if c != 'Date'}
+chg_cols = [c for c in show_daily.columns if c.endswith('(%)') or 'P&L' in c]
+st.dataframe(style_change_cols(show_daily.style.format(fmt, na_rep='—', subset=list(fmt)), chg_cols),
+             use_container_width=True, height=420, hide_index=True)
 
 # ---------------------------------------------------------
 # Breakdown table

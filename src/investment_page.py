@@ -1,191 +1,164 @@
-"""💰 Calculated Investment page (UI only — the maths lives in src/strategies.py)."""
+"""💰 Calculated Investment page (UI only: the maths lives in src/strategies.py)."""
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
-from src.ui import render_metric_card
-from src.asset_data import ASSETS, ASSET_LABELS, COLORS, PLOT_LAYOUT, filter_period, style_change_cols
+from src.ui import (
+    PLOT_LAYOUT, STRAT_COLORS, VIOLET, CYAN, EMERALD, AMBER, BLUE, BAD, FAINT, TEXT, MUTED,
+    hero, section, kpi_row, tone_of, note, explain, chart, hex_rgba, inr, inr_short, pct,
+    sidebar_nav, sidebar_footer,
+)
+from src.asset_data import ASSETS, ASSET_LABELS, ASSET_SHORT, ASSET_ICONS, COLORS, style_change_cols, blank_missing
 from src.period_picker import period_selector
 from src.strategies import (
     STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS,
     build_rebalance_dates, simulate_portfolio, simulate_buy_hold, build_diff_schedule,
 )
 
+
+def _extend_lookbacks(options):
+    """Add '2 Years' and '2.5 Years' to the look-back choices, in the same unit (months)
+    that strategies.py uses."""
+    opts = dict(options)
+    for label, months in {"2 Years": 24, "2.5 Years": 30}.items():
+        opts.setdefault(label, months)
+    return opts
+
+
+LOOKBACKS = _extend_lookbacks(LOOKBACK_OPTIONS)
+
 STRATEGY_HELP = {
     "bh": "Money is split once and never touched again. Each asset is bought on its own first trading "
           "day in the period (if an asset's data starts later, its share waits as cash until then). "
           "Weights drift as prices move.",
-    "periodic": "Money is split on the first day, then every month/quarter/etc. the portfolio is brought "
-                "back to your target weights (sell what grew, buy what fell).",
+    "periodic": "Money is split on the first day, then every month / quarter / half-year / year the portfolio "
+                "is brought back to your target weights (sell what grew, buy what fell).",
     "diff": "First buy uses your weights. On every rebalance date each asset's growth over the previous "
-            "6 months / 1 year / 1.5 years is compared: the asset that grew the MOST gets the SMALLEST of "
-            "your weights, and the one that grew the LEAST (or fell) gets the BIGGEST.",
+            "look-back period is compared: the asset that grew the MOST gets the SMALLEST of your weights, "
+            "and the one that grew the LEAST (or fell) gets the BIGGEST.",
 }
 
 
 def _short(name):
-    """'🥇 GoldBEES' → 'GoldBEES'"""
-    return ASSET_LABELS[name].split(' ', 1)[1]
+    return ASSET_SHORT[name]
 
 
 def render_investment_page(asset_dfs, fetch_errors):
-    # ---------------------------------------------------------
-    # Sidebar
-    # ---------------------------------------------------------
-    st.sidebar.markdown("## ⚙️ Control Panel")
-    if st.sidebar.button("⬅️ Back to Dashboard", use_container_width=True, type="primary"):
-        st.session_state["view"] = "dashboard"
-        st.rerun()
-    if st.sidebar.button("🎲 Monte Carlo Simulation", use_container_width=True, key="invest_to_mc"):
-        st.session_state["view"] = "montecarlo"
-        st.rerun()
-
-    st.sidebar.markdown("---")
+    # ---------------- Sidebar ----------------
+    sidebar_nav("invest")
     start_date, end_date = period_selector(asset_dfs, default_preset="1 Year", key="invest")
+    sidebar_footer(fetch_errors, key="invest")
 
-    st.sidebar.markdown("---")
-    if st.sidebar.button("🔄 Refresh Live Sheet Data", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+    # ---------------- Hero ----------------
+    hero("Calculated Investment",
+         "Enter an amount, split it across GoldBEES, Nifty 50, MidCap and SmallCap, and see exactly what it "
+         "would be worth today with buy & hold, regular rebalancing, or growth-based weights.",
+         page="invest", eyebrow="Backtest your split",
+         chips=[f"📅 {start_date:%d %b %Y} → {end_date:%d %b %Y}", "⚙️ Change the period in the sidebar"])
 
-    if fetch_errors:
-        with st.sidebar.expander("⚠️ Data load issues", expanded=False):
-            for name, err in fetch_errors.items():
-                st.write(f"**{name}:** {err}")
-
-    period_dfs = filter_period(asset_dfs, start_date, end_date)
-
-    # ---------------------------------------------------------
-    # Header
-    # ---------------------------------------------------------
-    st.markdown('<div class="header-title">💰 Calculated Investment</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="header-subtitle">Enter how much you invest and how to split it across GoldBEES, '
-        'LargeCap, MidCap & SmallCap. Choose buy & hold, same-weight rebalancing, or different weights '
-        'based on past growth.</div>',
-        unsafe_allow_html=True
-    )
-    st.caption("🏷️ Code version: **v4**: fixed date reading (data_loader) + start on the chosen month")
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ---------------------------------------------------------
-    # Strategy choice (outside the form so the inputs below change instantly)
-    # ---------------------------------------------------------
-    st.markdown("### 🧭 Investment Strategy")
+    # ---------------- Step 1: strategy ----------------
+    section("Step 1 · Choose a strategy", "Changes the options below instantly", "🧭", VIOLET)
     mode = st.radio("Strategy", list(STRATEGIES.keys()), format_func=lambda k: STRATEGIES[k],
                     horizontal=True, key="invest_mode", label_visibility="collapsed")
-    st.caption(STRATEGY_HELP[mode])
+    s_color = STRAT_COLORS[mode]
+    explain(STRATEGY_HELP[mode], s_color)
 
-    # ---------------------------------------------------------
-    # Input form
-    # ---------------------------------------------------------
+    # ---------------- Step 2: inputs ----------------
+    section("Step 2 · Amount & weights", "Weights that don't add up to 100% are scaled automatically", "💵",
+            EMERALD)
     freq_label, lookback_label = None, None
     with st.form("investment_form"):
-        st.markdown("### 💵 Investment Amount")
-        total_amount = st.number_input("Total amount to invest (₹)", min_value=1000.0,
-                                       value=100000.0, step=10000.0, format="%.0f")
+        a1, a2 = st.columns([1.2, 2])
+        with a1:
+            total_amount = st.number_input("💰 Total amount to invest (₹)", min_value=1000.0, value=100000.0,
+                                           step=10000.0, format="%.0f")
+            st.caption(f"= {inr_short(total_amount)}")
+        with a2:
+            if mode == "periodic":
+                freq_label = st.selectbox("🔁 Rebalance every", list(REBAL_FREQ.keys()), index=1, key="rebal_freq")
+            elif mode == "diff":
+                lookback_label = st.radio("🔍 Compare growth over the previous", list(LOOKBACKS.keys()), index=1,
+                                          horizontal=True, key="diff_lookback")
+                freq_label = st.radio("🔁 Rebalance every", list(DIFF_REBAL_FREQ.keys()), index=1,
+                                      horizontal=True, key="diff_freq")
+            else:
+                st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+                note("Buy & Hold has no extra settings: money is invested once on the first day.", CYAN, "🧺")
 
-        st.markdown("### ⚖️ Your weights for each asset (%)")
+        st.markdown("**⚖️ Weight of each asset (%)**")
         weights = {}
         for col, name in zip(st.columns(4), ASSETS):
             with col:
-                weights[name] = st.number_input(ASSET_LABELS[name], min_value=0.0, max_value=100.0,
-                                                value=25.0, step=5.0, key=f"w_{name}")
-
-        if mode == "periodic":
-            freq_label = st.selectbox("🔁 Rebalance every", list(REBAL_FREQ.keys()), index=1,
-                                      key="rebal_freq")
-        elif mode == "diff":
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("#### 🔍 Compare growth with previous")
-                lookback_label = st.radio("Look-back period", list(LOOKBACK_OPTIONS.keys()), index=1,
-                                          horizontal=True, key="diff_lookback", label_visibility="collapsed")
-            with c2:
-                st.markdown("#### 🔁 Rebalance every")
-                freq_label = st.radio("Rebalance frequency", list(DIFF_REBAL_FREQ.keys()), index=1,
-                                      horizontal=True, key="diff_freq", label_visibility="collapsed")
-
-        st.caption(f"Investment period: **{start_date:%b %Y}** to **{end_date:%b %Y}** "
-                   "(change it from the sidebar).")
-        submitted = st.form_submit_button("🧮 Calculate Investment", use_container_width=True, type="primary")
+                weights[name] = st.number_input(f"{ASSET_ICONS[name]} {ASSET_SHORT[name]}", min_value=0.0,
+                                                max_value=100.0, value=25.0, step=5.0, key=f"w_{name}")
+        submitted = st.form_submit_button("🧮  Calculate investment", width="stretch", type="primary")
 
     if not submitted and "invest_done" not in st.session_state:
-        st.info("👆 Choose a strategy, enter your amount and weights, then press **Calculate Investment**.")
+        note("Choose a strategy, enter your amount and weights, then press <b>Calculate investment</b>.", VIOLET, "👆")
         st.stop()
     st.session_state["invest_done"] = True
 
-    # ---------------------------------------------------------
-    # Weights check
-    # ---------------------------------------------------------
+    # ---------------- Weights check ----------------
     total_w = sum(weights.values())
     if total_w <= 0:
-        st.error("Please give at least one asset a weight above 0%.")
+        note("Please give at least one asset a weight above 0%.", BAD, "⛔")
         st.stop()
     if abs(total_w - 100) > 0.01:
-        st.info(f"Your weights add up to **{total_w:.1f}%**. They will be scaled to 100%.")
+        note(f"Your weights add up to <b>{total_w:.1f}%</b>, so they were scaled to 100%.", AMBER, "⚖️")
 
     used = [n for n in ASSETS if weights[n] > 0]
     missing = [n for n in used if asset_dfs.get(n) is None
                or (asset_dfs[n]['Date'] > pd.Timestamp(end_date)).all()]   # no price on/before the end
     if missing:
-        st.error("No data in this period for: " + ", ".join(ASSET_LABELS[m] for m in missing)
-                 + ". Set its weight to 0% or choose a different period.")
+        note("No data in this period for: <b>" + ", ".join(ASSET_LABELS[m] for m in missing)
+             + "</b>. Set its weight to 0% or choose a different period.", BAD, "⛔")
         st.stop()
     w0 = {n: weights[n] / total_w for n in used}
 
-    # ---------------------------------------------------------
-    # Price table: one column per asset, missing days filled with the previous price
-    # ---------------------------------------------------------
+    # ---------------- Price table ----------------
     # Built from the FULL history and then cut to the period, so an asset whose sheet has a gap
     # at the start of the period still has a price (its last known one) on the first day.
-    # Before, only rows inside the period were used, so one asset with a gap pushed the first
-    # buy (and every rebalance after it) forward — e.g. From Feb 2017 started in 2019.
     p_start, p_end = pd.Timestamp(start_date), pd.Timestamp(end_date)
     full_prices = pd.concat({n: asset_dfs[n].set_index('Date')['Close'] for n in used}, axis=1, sort=True)
     full_prices = full_prices.loc[:p_end]
     trade_days = full_prices.index[full_prices.index >= p_start]
     raw_prices = full_prices.ffill().loc[trade_days]
     first_dates = {n: raw_prices[n].first_valid_index() for n in used}
+    if any(d is None for d in first_dates.values()):
+        note("Not enough price data in this period. Try a longer period.", BAD, "⛔")
+        st.stop()
     common_start = max(first_dates.values())
-
-    if mode == "bh":
-        prices = raw_prices.loc[min(first_dates.values()):]
-    else:   # rebalancing needs a price for every asset
-        prices = raw_prices.loc[common_start:]
+    prices = raw_prices.loc[min(first_dates.values()):] if mode == "bh" else raw_prices.loc[common_start:]
 
     if len(prices) < 2:
-        st.error("Not enough price data in this period. Try a longer period.")
+        note("Not enough price data in this period. Try a longer period.", BAD, "⛔")
         st.stop()
 
-    # Warn when a price is being carried forward over a long gap in the sheet
-    last_real = {n: full_prices[n].dropna().index for n in used}
+    # Warn when a price is carried forward over a long gap in the sheet
     stale = []
     for n in used:
-        real = last_real[n]
+        real = full_prices[n].dropna().index
         on_first = real[real <= prices.index[0]]
         if len(on_first) and (prices.index[0] - on_first[-1]).days > 40:
-            stale.append(f"**{ASSET_LABELS[n]}** (last price before the start is from {on_first[-1]:%d %b %Y})")
+            stale.append(f"<b>{ASSET_SHORT[n]}</b> (last price before the start is from {on_first[-1]:%d %b %Y})")
         gaps = real[real >= prices.index[0]].to_series().diff().dt.days
         if len(gaps) and gaps.max() > 40:
-            stale.append(f"**{ASSET_LABELS[n]}** has no data between {gaps.idxmax() - pd.Timedelta(days=int(gaps.max())):%d %b %Y} "
-                         f"and {gaps.idxmax():%d %b %Y}")
+            stale.append(f"<b>{ASSET_SHORT[n]}</b> has no data between "
+                         f"{gaps.idxmax() - pd.Timedelta(days=int(gaps.max())):%d %b %Y} and {gaps.idxmax():%d %b %Y}")
     if stale:
-        st.warning("⚠️ Gaps in the sheet data, the last known price is used through them: " + "; ".join(stale)
-                   + ". Fill these dates in the Google Sheet for exact results.")
+        note("Gaps in the sheet data; the last known price is used through them: " + "; ".join(stale)
+             + ". Fill these dates in the Google Sheet for exact results.", AMBER, "⚠️")
 
     late = [n for n in used if first_dates[n] > prices.index[0] + pd.Timedelta(days=7)]
     if mode == "bh" and late:
-        st.info("Bought later because their data starts later (their money waits as cash until then): "
-                + ", ".join(f"**{ASSET_LABELS[n]}** on {first_dates[n]:%d %b %Y}" for n in late))
+        note("Bought later because their data starts later (their money waits as cash until then): "
+             + ", ".join(f"<b>{ASSET_SHORT[n]}</b> on {first_dates[n]:%d %b %Y}" for n in late), BLUE)
     elif mode != "bh" and common_start > pd.Timestamp(start_date) + pd.Timedelta(days=7):
-        st.info(f"Investing starts on **{common_start:%d %b %Y}**, the first date on which all selected "
-                "assets have a price.")
+        note(f"Investing starts on <b>{common_start:%d %b %Y}</b>, the first date on which all selected assets "
+             "have a price.", BLUE)
 
-    # ---------------------------------------------------------
-    # Run the chosen strategy
-    # ---------------------------------------------------------
+    # ---------------- Run the strategy ----------------
     decisions = None
     if mode == "bh":
         schedule = [(prices.index[0], w0)]
@@ -193,10 +166,10 @@ def render_investment_page(asset_dfs, fetch_errors):
     elif mode == "periodic":
         schedule = [(d, w0) for d in build_rebalance_dates(prices.index, REBAL_FREQ[freq_label])]
         units_df, values, trade_log = simulate_portfolio(prices, schedule, total_amount)
-    else:   # diff
+    else:
         full_close = {n: asset_dfs[n].set_index('Date')['Close'] for n in used}   # full history for look-back
         schedule, decisions = build_diff_schedule(prices, full_close, w0, DIFF_REBAL_FREQ[freq_label],
-                                                  LOOKBACK_OPTIONS[lookback_label])
+                                                  LOOKBACKS[lookback_label])
         units_df, values, trade_log = simulate_portfolio(prices, schedule, total_amount)
 
     rebal_dates = [d for d, _ in schedule]
@@ -204,9 +177,7 @@ def render_investment_page(asset_dfs, fetch_errors):
     if mode != "bh":
         _, bh_values, _ = simulate_buy_hold(prices, w0, total_amount)
 
-    # ---------------------------------------------------------
-    # Result numbers
-    # ---------------------------------------------------------
+    # ---------------- Result numbers ----------------
     invested = total_amount
     current = values['Total'].iloc[-1]
     profit = current - invested
@@ -231,161 +202,144 @@ def render_investment_page(asset_dfs, fetch_errors):
         'Return (%)': (values[n].iloc[-1] / net_invested[n] - 1) * 100 if net_invested[n] > 0 else float('nan'),
     } for n in used])
 
-    # ---------------------------------------------------------
-    # Summary cards
-    # ---------------------------------------------------------
-    st.markdown("## 📊 Results")
+    # ---------------- Results ----------------
     if mode == "bh":
-        strat_text = STRATEGIES[mode]
-        detail = "bought once, never rebalanced"
+        strat_text, detail = STRATEGIES[mode], "bought once, never rebalanced"
     else:
         strat_text = STRATEGIES[mode] + f" · {freq_label.lower()}"
         if mode == "diff":
             strat_text += f" · compare previous {lookback_label}"
         n_reb = len(schedule) - 1
         detail = f"first buy + {n_reb} rebalance{'s' if n_reb != 1 else ''}"
-    st.caption(f"Strategy: **{strat_text}**  ·  {values.index[0]:%d %b %Y} to {values.index[-1]:%d %b %Y}  ·  {detail}")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        render_metric_card("Total Invested", f"₹{invested:,.0f}", is_positive=True)
-    with c2:
-        render_metric_card("Current Value", f"₹{current:,.0f}", f"{ret_pct:+.2f}%", is_positive=profit >= 0)
-    with c3:
-        render_metric_card("Profit / Loss", f"₹{profit:+,.0f}", f"{ret_pct:+.2f}%", is_positive=profit >= 0)
-    with c4:
-        render_metric_card("CAGR (Whole Period)", f"{cagr:.2f}%", f"over {years:.2f} years", is_positive=cagr >= 0)
-    with c5:
-        render_metric_card("Max Drawdown", f"{max_dd:.2f}%", is_positive=False)
+    section("Results", f"{values.index[0]:%d %b %Y} → {values.index[-1]:%d %b %Y} · {detail}", "📊", s_color)
+    kpi_row(_result_cards(invested, current, profit, ret_pct, cagr, years, max_dd, s_color))
 
     if bh_values is not None:
         bh_cur = bh_values['Total'].iloc[-1]
         bh_cagr = ((bh_cur / invested) ** (1 / years) - 1) * 100
         bh_dd = (bh_values['Total'] / bh_values['Total'].cummax() - 1).min() * 100
+        bh_ret = (bh_cur / invested - 1) * 100
         diff = current - bh_cur
-        st.markdown("#### ⚖️ Compared with Buy & Hold (your weights, never rebalanced)")
-        cmp_df = pd.DataFrame([
-            {'Strategy': strat_text, 'Final Value (₹)': current, 'Return (%)': ret_pct,
-             'CAGR (%)': cagr, 'Max Drawdown (%)': max_dd},
-            {'Strategy': STRATEGIES['bh'], 'Final Value (₹)': bh_cur, 'Return (%)': (bh_cur / invested - 1) * 100,
-             'CAGR (%)': bh_cagr, 'Max Drawdown (%)': bh_dd},
-        ])
-        st.dataframe(cmp_df.style.format({'Final Value (₹)': '₹{:,.2f}', 'Return (%)': '{:+.2f}%',
-                                          'CAGR (%)': '{:.2f}%', 'Max Drawdown (%)': '{:.2f}%'}),
-                     use_container_width=True, hide_index=True)
-        st.caption(f"Your strategy ended **₹{diff:+,.0f}** {'ahead of' if diff >= 0 else 'behind'} buy & hold.")
 
-    # ---------------------------------------------------------
-    # Different Weights: how each date's weights were decided
-    # ---------------------------------------------------------
+        section("Head-to-head with Buy & Hold", "Same amount, same weights, never rebalanced", "🤝", CYAN)
+        kpi_row(_result_cards(invested, bh_cur, bh_cur - invested, bh_ret, bh_cagr, years, bh_dd, CYAN))
+        verdict_color = EMERALD if diff >= 0 else BAD
+        note(f"Your strategy ended <b>{inr(diff, sign=True)}</b> "
+             f"{'ahead of' if diff >= 0 else 'behind'} buy & hold "
+             f"(CAGR {cagr:.2f}% vs {bh_cagr:.2f}%, max drawdown {max_dd:.1f}% vs {bh_dd:.1f}%).",
+             verdict_color, "🏆" if diff >= 0 else "📉")
+
     if decisions is not None:
         _render_weight_decisions(decisions, lookback_label)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ---------------------------------------------------------
-    # Charts
-    # ---------------------------------------------------------
-    left, right = st.columns([2, 1])
-    with left:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=values.index, y=values['Total'], name='Total Value',
-                                 line=dict(color='#A855F7', width=3)))
-        if bh_values is not None:
-            fig.add_trace(go.Scatter(x=bh_values.index, y=bh_values['Total'], name='Buy & Hold (compare)',
-                                     line=dict(color='#94A3B8', width=1.5, dash='dash')))
-        for n in used:
-            fig.add_trace(go.Scatter(x=values.index, y=values[n], name=ASSET_LABELS[n],
-                                     line=dict(color=COLORS[n], width=1.2, dash='dot'), visible='legendonly'))
-        if len(rebal_dates) > 1:
-            fig.add_trace(go.Scatter(x=rebal_dates[1:], y=values['Total'].loc[rebal_dates[1:]], mode='markers',
-                                     name='Rebalance', marker=dict(color='#F8FAFC', size=7, symbol='diamond')))
-        fig.add_hline(y=invested, line_dash="dash", line_color="#64748B",
-                      annotation_text=f"Invested ₹{invested:,.0f}", annotation_position="top left")
-        fig.update_layout(**PLOT_LAYOUT, title="Investment Value Over Time (₹)", height=450,
-                          hovermode='x unified', yaxis=dict(tickprefix="₹"))
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("Click an asset in the legend to show its own value line.")
-
-    with right:
-        pie_df = pd.DataFrame({'Asset': [ASSET_LABELS[n] for n in used],
-                               'Current Value': [values[n].iloc[-1] for n in used]})
-        fig_pie = px.pie(pie_df, names='Asset', values='Current Value', hole=0.5,
-                         color='Asset', color_discrete_map={ASSET_LABELS[k]: v for k, v in COLORS.items()},
-                         title="Current Allocation")
-        fig_pie.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', height=450,
-                              margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation='h'))
-        st.plotly_chart(fig_pie, use_container_width=True)
+    # ---------------- Charts ----------------
+    section("Growth over time", "Your total next to buy & hold, and how each holding moved", "📈", BLUE)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.09, row_heights=[0.55, 0.45],
+                        subplot_titles=("Total portfolio value (₹)", "Value of each holding inside it (₹)"))
+    fig.add_trace(go.Scatter(x=values.index, y=values['Total'], name='Total portfolio',
+                             line=dict(color=s_color, width=3), fill='tozeroy', fillcolor=hex_rgba(s_color, 0.10),
+                             hovertemplate="₹%{y:,.0f}"), row=1, col=1)
+    if bh_values is not None:
+        fig.add_trace(go.Scatter(x=bh_values.index, y=bh_values['Total'], name='Buy & Hold (compare)',
+                                 line=dict(color=MUTED, width=1.6, dash='dash'), hovertemplate="₹%{y:,.0f}"),
+                      row=1, col=1)
+    if len(rebal_dates) > 1:
+        fig.add_trace(go.Scatter(x=rebal_dates[1:], y=values['Total'].loc[rebal_dates[1:]], mode='markers',
+                                 name='Rebalance', hoverinfo='skip',
+                                 marker=dict(color=TEXT, size=9, symbol='diamond', line=dict(color=s_color, width=1.5))),
+                      row=1, col=1)
+    fig.add_hline(y=invested, line_dash="dot", line_color=FAINT, annotation_text=f"Invested {inr(invested)}",
+                  annotation_position="bottom right", annotation_font_color=MUTED, row=1, col=1)
+    for n in used:
+        fig.add_trace(go.Scatter(x=values.index, y=values[n], name=ASSET_SHORT[n],
+                                 line=dict(color=COLORS[n], width=2), hovertemplate="₹%{y:,.0f}"), row=2, col=1)
+    lo_t = min(values['Total'].min(), invested, bh_values['Total'].min() if bh_values is not None else invested)
+    hi_t = max(values['Total'].max(), invested, bh_values['Total'].max() if bh_values is not None else invested)
+    pad = (hi_t - lo_t) * 0.08 or invested * 0.02
+    fig.update_yaxes(tickprefix="₹", tickformat=",.0f")
+    fig.update_yaxes(range=[lo_t - pad, hi_t + pad], row=1, col=1)
+    fig.update_annotations(font=dict(size=13, color="#C7CEE3"))
+    fig.update_layout(**PLOT_LAYOUT, height=640, hovermode='x unified',
+                      legend=dict(orientation='h', yanchor='bottom', y=1.04, xanchor='right', x=1))
+    with st.container(border=True):
+        chart(fig, key="inv_main")
+    st.caption("Bottom panel: the ₹ value of each asset inside your portfolio; together they add up to the total "
+               "above. Click a legend item to hide / show it.")
 
     wt = values[used].div(values['Total'], axis=0) * 100
     fig_w = go.Figure()
     for n in used:
-        fig_w.add_trace(go.Scatter(x=wt.index, y=wt[n], name=ASSET_LABELS[n], stackgroup='one',
-                                   line=dict(width=0.5, color=COLORS[n])))
-    fig_w.update_layout(**PLOT_LAYOUT, title="Actual Weight of Each Asset Over Time (%)", height=350,
-                        hovermode='x unified', yaxis=dict(ticksuffix="%", range=[0, 100]))
-    st.plotly_chart(fig_w, use_container_width=True)
-    st.caption("Weights drift as prices move. Each rebalance sets them to that date's target.")
+        fig_w.add_trace(go.Scatter(x=wt.index, y=wt[n], name=ASSET_SHORT[n], stackgroup='one',
+                                   line=dict(width=0.6, color=COLORS[n]), hovertemplate="%{y:.1f}%"))
+    fig_w.update_layout(**PLOT_LAYOUT, title="Actual weight of each asset over time (%)", height=340,
+                        hovermode='x unified', yaxis=dict(ticksuffix="%", range=[0, 100]),
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
+    with st.container(border=True):
+        chart(fig_w, key="inv_weights")
 
-    # ---------------------------------------------------------
-    # Breakdown table
-    # ---------------------------------------------------------
-    st.markdown("### 📋 Asset-wise Breakdown")
+    # ---------------- Breakdown table ----------------
+    section("Asset-wise breakdown", "Net invested = money put in minus money taken out at rebalances", "📋",
+            AMBER)
     total_row = pd.DataFrame([{
         'Asset': '🧾 TOTAL', 'Starting Weight (%)': 100.0, 'Latest Target Weight (%)': 100.0,
-        'Current Weight (%)': 100.0, 'Net Invested (₹)': invested, 'Units Held': None, 'Latest Date': '',
-        'Latest Price (₹)': None, 'Current Value (₹)': current, 'Profit / Loss (₹)': profit, 'Return (%)': ret_pct,
+        'Current Weight (%)': 100.0, 'Net Invested (₹)': invested, 'Units Held': float('nan'), 'Latest Date': '',
+        'Latest Price (₹)': float('nan'), 'Current Value (₹)': current, 'Profit / Loss (₹)': profit, 'Return (%)': ret_pct,
     }])
     table = pd.concat([result, total_row], ignore_index=True)
     if mode != "diff":
         table = table.drop(columns=['Latest Target Weight (%)'])
-    styler = table.style.format({
+    money2 = lambda v: inr(v, 2)  # noqa: E731
+    tfmt = {
         'Starting Weight (%)': '{:.2f}%', 'Latest Target Weight (%)': '{:.2f}%', 'Current Weight (%)': '{:.2f}%',
-        'Net Invested (₹)': '₹{:,.2f}', 'Units Held': '{:,.4f}', 'Latest Price (₹)': '₹{:,.2f}',
-        'Current Value (₹)': '₹{:,.2f}', 'Profit / Loss (₹)': '₹{:+,.2f}', 'Return (%)': '{:+.2f}%'
-    }, na_rep='—', subset=[c for c in table.columns if c not in ('Asset', 'Latest Date')])
-    st.dataframe(style_change_cols(styler, ['Profit / Loss (₹)', 'Return (%)']),
-                 use_container_width=True, hide_index=True)
-    if mode != "bh":
-        st.caption("**Net Invested** = money put into the asset minus money taken out of it at rebalances. "
-                   "Profit / Loss = Current Value − Net Invested.")
+        'Net Invested (₹)': money2, 'Units Held': '{:,.4f}', 'Latest Price (₹)': money2,
+        'Current Value (₹)': money2, 'Profit / Loss (₹)': lambda v: inr(v, 2, sign=True), 'Return (%)': '{:+.2f}%'}
+    tfmt = {k: v for k, v in tfmt.items() if k in table.columns}
+    table, tfmt = blank_missing(table, tfmt)
+    styler = table.style.format(tfmt)
+    st.dataframe(style_change_cols(styler, ['Profit / Loss (₹)', 'Return (%)']), width="stretch", hide_index=True)
 
-    # ---------------------------------------------------------
-    # Rebalance data (table + CSV)
-    # ---------------------------------------------------------
     _render_rebalance_data(schedule, trade_log, used, prices, units_df, values, current,
                            start_date, end_date, decisions, lookback_label)
 
 
-def _render_weight_decisions(decisions, lookback_label):
-    """Table showing, for every rebalance date, each asset's growth, its rank and the weight it got."""
-    st.markdown(f"#### 📐 How the weights were decided (growth over previous {lookback_label})")
-    st.caption("Rank 1 = highest growth → gets the smallest of your weights. "
-               "The lowest growth gets the biggest weight. "
-               "If an asset has no data that far back, it keeps your weight.")
+def _result_cards(invested, current, profit, ret_pct, cagr, years, max_dd, accent):
+    return [
+        dict(label="Total invested", value=inr(invested), icon="💵", accent=BLUE),
+        dict(label="Current value", value=inr(current), delta=pct(ret_pct), tone=tone_of(profit), icon="💎",
+             accent=accent),
+        dict(label="Profit / loss", value=inr(profit, sign=True), delta=pct(ret_pct), tone=tone_of(profit),
+             icon="💰", accent=EMERALD if profit >= 0 else BAD),
+        dict(label="CAGR", value=pct(cagr, sign=False), delta=f"over {years:.2f} years", icon="🚀", accent=VIOLET),
+        dict(label="Max drawdown", value=pct(max_dd, sign=False), delta="worst fall from a peak", tone="bad",
+             icon="📉", accent=BAD),
+    ]
 
+
+def _render_weight_decisions(decisions, lookback_label):
+    """For every rebalance date: each asset's growth, its rank and the weight it got."""
+    section("How the weights were decided", f"Growth over the previous {lookback_label}. Rank 1 = highest "
+            "growth → smallest weight. No older data → keeps your weight.", "📐", STRAT_COLORS['diff'])
     show = decisions.copy()
     show['Date'] = show['Date'].dt.strftime('%d-%m-%Y')
     show['Compare From'] = show['Compare From'].apply(lambda d: d.strftime('%d-%m-%Y') if pd.notna(d) else '—')
     show['Asset'] = show['Asset'].map(_short)
     show = show.drop(columns=['Rebalance #'])
-    num_cols = ['Price Then (₹)', 'Price Now (₹)', 'Growth (%)', 'Growth Rank', 'Your Weight (%)', 'New Weight (%)']
-    styler = show.style.format({
-        'Price Then (₹)': '₹{:,.2f}', 'Price Now (₹)': '₹{:,.2f}', 'Growth (%)': '{:+.2f}%',
-        'Growth Rank': '{:.0f}', 'Your Weight (%)': '{:.2f}%', 'New Weight (%)': '{:.2f}%',
-    }, na_rep='—', subset=num_cols)
-    st.dataframe(style_change_cols(styler, ['Growth (%)']), use_container_width=True, hide_index=True,
+    dfmt = {'Price Then (₹)': lambda v: inr(v, 2), 'Price Now (₹)': lambda v: inr(v, 2), 'Growth (%)': '{:+.2f}%',
+            'Growth Rank': '{:.0f}', 'Your Weight (%)': '{:.2f}%', 'New Weight (%)': '{:.2f}%'}
+    show, dfmt = blank_missing(show, dfmt)
+    styler = show.style.format(dfmt)
+    st.dataframe(style_change_cols(styler, ['Growth (%)']), width="stretch", hide_index=True,
                  height=min(420, 38 + 35 * len(show)))
-    st.download_button("⬇️ Download Weight Decisions (CSV)",
-                       show.to_csv(index=False).encode('utf-8-sig'),
+    st.download_button("⬇️  Download weight decisions (CSV)", show.to_csv(index=False).encode('utf-8-sig'),
                        file_name="weight_decisions.csv", mime="text/csv")
 
 
 def _render_rebalance_data(schedule, trade_log, used, prices, units_df, values, current,
                            start_date, end_date, decisions=None, lookback_label=None):
-    st.markdown("### 📥 Rebalance Data")
+    section("Rebalance log", "Weights before (drifted) and after (new target) on every rebalance date, plus "
+            "the value at the end", "📥", CYAN)
 
-    # Different Weights: previous price + % change for every (rebalance #, asset)
     cmp = {}
     if decisions is not None:
         for _, d in decisions.iterrows():
@@ -427,7 +381,6 @@ def _render_rebalance_data(schedule, trade_log, used, prices, units_df, values, 
                    'Price (₹)': round(prices[n].iloc[-1], 2)}
         if decisions is not None:
             end_row.update({cf_col: None, 'Prev Price (₹)': None, 'Change vs Prev (%)': None, 'Growth Rank': None})
-        rows.append(end_row)
         end_row.update({
             'Units Before': round(units_df[n].iloc[-1], 4),
             'Value Before (₹)': round(values[n].iloc[-1], 2),
@@ -435,14 +388,11 @@ def _render_rebalance_data(schedule, trade_log, used, prices, units_df, values, 
             'Units Bought / Sold': None, 'Units After': None, 'Value After (₹)': None, 'Weight After (%)': None,
             'Portfolio Value (₹)': round(current, 2),
         })
+        rows.append(end_row)
     reb = pd.DataFrame(rows)
-    st.caption("On each rebalance date: the weights before (drifted) and after (the new target), with the "
-               "price and units for every asset. The last rows show the value at the end of the period.")
     if decisions is not None:
-        st.caption(f"**Prev Price** = the asset's price {lookback_label} before that date (on the "
-                   f"*Compare From* date). **Change vs Prev** = % growth from Prev Price to Price. "
-                   "Rank 1 = highest growth.")
-    st.dataframe(reb, use_container_width=True, height=320, hide_index=True)
-    st.download_button("⬇️ Download Rebalance Data (CSV)", reb.to_csv(index=False).encode('utf-8-sig'),
-                       file_name=f"rebalance_data_{start_date:%Y%m%d}_{end_date:%Y%m%d}.csv",
-                       mime="text/csv", type="primary")
+        st.caption(f"**Prev Price** = the asset's price {lookback_label} before that date (on the *Compare From* "
+                   "date). **Change vs Prev** = % growth from Prev Price to Price. Rank 1 = highest growth.")
+    st.dataframe(blank_missing(reb)[0], width="stretch", height=340, hide_index=True)
+    st.download_button("⬇️  Download rebalance log (CSV)", reb.to_csv(index=False).encode('utf-8-sig'),
+                       file_name=f"rebalance_data_{start_date:%Y%m%d}_{end_date:%Y%m%d}.csv", mime="text/csv")

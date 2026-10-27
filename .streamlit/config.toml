@@ -1,15 +1,28 @@
 [theme]
-primaryColor = "#6366F1"
-backgroundColor = "#0F172A"
-secondaryBackgroundColor = "#1E293B"
-textColor = "#F8FAFC"
-font = "sans serif"
+base = "dark"
+primaryColor = "#8B5CF6"
+backgroundColor = "#0A0F1E"
+secondaryBackgroundColor = "#141B2F"
+textColor = "#E6EAF5"
+borderColor = "#232D4A"
+baseRadius = "0.75rem"
+font = "'Plus Jakarta Sans':https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap"
+showWidgetBorder = true
+
+[theme.sidebar]
+backgroundColor = "#0D1426"
+secondaryBackgroundColor = "#17203A"
+borderColor = "#1F2944"
 
 [server]
 headless = true
 enableCORS = false
 enableXsrfProtection = true
 port = 8501
+
+[client]
+toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false

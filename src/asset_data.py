@@ -1,15 +1,16 @@
-"""Shared data loading, cleaning and UI helpers used by both pages
-(app.py and pages/calculated_investment.py)."""
+"""Shared data loading, cleaning and table helpers used by every page."""
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import streamlit as st
 
+from src.ui import PLOT_LAYOUT as _UI_PLOT_LAYOUT, GOOD_TEXT, BAD_TEXT
+
 from src.data_loader import (
     load_csv_data,
     get_available_datasets,
     parse_google_sheet_url,
-    fetch_google_sheet_csv,
     download_sheet_csv,
     parse_dates,
 )
@@ -22,8 +23,11 @@ ASSET_LABELS = {
     'MidCap': '🏬 MidCap',
     'SmallCap': '🏪 SmallCap'
 }
+ASSET_SHORT = {'Gold': 'GoldBEES', 'LargeCap': 'Nifty 50', 'MidCap': 'MidCap', 'SmallCap': 'SmallCap'}
+ASSET_ICONS = {'Gold': '🥇', 'LargeCap': '🏢', 'MidCap': '🏬', 'SmallCap': '🏪'}
 
-COLORS = {'Gold': '#F59E0B', 'LargeCap': '#6366F1', 'MidCap': '#10B981', 'SmallCap': '#EF4444'}
+# One vivid colour per asset, used on every chart, card and chip
+COLORS = {'Gold': '#FBBF24', 'LargeCap': '#60A5FA', 'MidCap': '#34D399', 'SmallCap': '#F472B6'}
 
 # Google Sheet Live URLs
 SHEET_URLS = {
@@ -33,18 +37,7 @@ SHEET_URLS = {
     'SmallCap': 'https://docs.google.com/spreadsheets/d/1xwzl_75YssaiWQXJy8S24XOINThnnorSTU5tsZX48Bo/edit?usp=drive_link'
 }
 
-PERIOD_PRESETS = {
-    # values are in MONTHS
-    "1 Month": 1, "3 Months": 3, "6 Months": 6, "1 Year": 12,
-    "3 Years": 36, "5 Years": 60, "All Data": None, "Custom Range": "custom"
-}
-
-PLOT_LAYOUT = dict(
-    template='plotly_dark',
-    paper_bgcolor='rgba(0,0,0,0)',
-    plot_bgcolor='rgba(15, 23, 42, 0.6)',
-    margin=dict(l=20, r=20, t=40, b=20)
-)
+PLOT_LAYOUT = _UI_PLOT_LAYOUT
 
 DATE_NAMES = ('date', 'datetime', 'timestamp', 'time', 'day')
 CLOSE_NAMES = ('close', 'close price', 'closing price', 'price', 'adj close', 'ltp', 'last price')
@@ -122,12 +115,43 @@ def normalize_asset_df(df):
     return df if not df.empty else None
 
 
+def blank_missing(df, fmt=None):
+    """Streamlit shows empty numeric cells as 'None' even when a Styler formats them.
+    For every column that has empty cells, write the formatted text ('—' when empty) into the
+    column itself. Returns (df, remaining_fmt) — pass remaining_fmt to df.style.format()."""
+    df = df.copy()
+    fmt = dict(fmt or {})
+    for col in df.columns:
+        if not df[col].isna().any() or df[col].dtype == object and df[col].map(lambda v: isinstance(v, str)).all():
+            continue
+        f = fmt.pop(col, None)
+        if f is None:
+            f = (lambda v: f"{v:,.4f}".rstrip('0').rstrip('.')) if pd.api.types.is_float_dtype(df[col]) else str
+        df[col] = ['—' if (v is None or (isinstance(v, float) and v != v)) else
+                   (f(v) if callable(f) else f.format(v)) for v in df[col]]
+    return df, fmt
+
+
+def _as_number(v):
+    if isinstance(v, str):
+        s = v.replace('−', '-').replace(',', '')
+        s = re.sub(r'[^0-9.\-]', '', s)
+        try:
+            return float(s)
+        except ValueError:
+            return float('nan')
+    return v
+
+
 def style_change_cols(styler, cols):
-    """Colour positive values green and negative values red."""
+    """Colour positive values green and negative values red (also works on formatted text)."""
     def color(v):
+        v = _as_number(v)
         if pd.isna(v):
             return ''
-        return 'color: #10B981' if v > 0 else ('color: #EF4444' if v < 0 else '')
+        if v > 0:
+            return f'color: {GOOD_TEXT}; font-weight: 600'
+        return f'color: {BAD_TEXT}; font-weight: 600' if v < 0 else ''
     apply_fn = styler.map if hasattr(styler, 'map') else styler.applymap
     return apply_fn(color, subset=cols)
 
@@ -168,45 +192,6 @@ def load_all_assets():
                     break
 
     return asset_dfs, fetch_errors
-
-
-# ---------------------------------------------------------
-# Sidebar period selector (used on both pages)
-# ---------------------------------------------------------
-def period_selector(asset_dfs, default_preset="1 Year", key="main"):
-    """Draws the 'Select Time Period' controls in the sidebar and returns (start_date, end_date)."""
-    overall_min = min(df['Date'].min() for df in asset_dfs.values()).date()
-    overall_max = max(df['Date'].max() for df in asset_dfs.values()).date()
-
-    st.sidebar.markdown("### 📅 Select Time Period")
-    options = list(PERIOD_PRESETS.keys())
-    preset = st.sidebar.selectbox("Period", options, index=options.index(default_preset), key=f"{key}_preset")
-    preset_val = PERIOD_PRESETS[preset]
-
-    if preset_val == "custom":
-        # Pick whole months (e.g. "Nov 2015" to "Oct 2026") instead of exact days
-        months = list(pd.period_range(pd.Timestamp(overall_min).to_period('M'),
-                                      pd.Timestamp(overall_max).to_period('M'), freq='M'))
-        default_from = max(0, len(months) - 12)          # last 12 months by default
-        from_m = st.sidebar.selectbox("📍 From month", months, index=default_from,
-                                      format_func=lambda p: p.strftime('%b %Y'), key=f"{key}_from_m")
-        to_m = st.sidebar.selectbox("🏁 To month", months, index=len(months) - 1,
-                                    format_func=lambda p: p.strftime('%b %Y'), key=f"{key}_to_m")
-        if from_m > to_m:
-            st.sidebar.error("'From month' must be before 'To month'. Showing them swapped.")
-            from_m, to_m = to_m, from_m
-        # From = 1st day of the start month, To = last day of the end month (kept inside the data range)
-        start_date = max(overall_min, from_m.start_time.date())
-        end_date = min(overall_max, to_m.end_time.date())
-    elif preset_val is None:
-        start_date, end_date = overall_min, overall_max
-    else:
-        # Presets are in months, so "1 Year" = same day 12 months earlier
-        end_date = overall_max
-        start_date = max(overall_min, (pd.Timestamp(overall_max) - pd.DateOffset(months=preset_val)).date())
-
-    st.sidebar.caption(f"Showing **{start_date:%d %b %Y}** to **{end_date:%d %b %Y}**")
-    return start_date, end_date
 
 
 def filter_period(asset_dfs, start_date, end_date):
