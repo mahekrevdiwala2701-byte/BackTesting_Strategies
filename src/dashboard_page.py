@@ -33,7 +33,7 @@ def render_dashboard_page(asset_dfs, fetch_errors):
         if n in period_dfs and len(period_dfs[n]) > 5:
             hero_line = period_dfs[n]['Close'].to_numpy()
             break
-    hero("Multi-Asset Market Dashboard",
+    hero("Market Overview",
          "GoldBEES, Nifty 50, MidCap and SmallCap side by side: prices, trends, correlations and raw data, "
          "synced live from Google Sheets.",
          page="dashboard", eyebrow="Live overview",

@@ -46,6 +46,7 @@ BAD_TEXT = "#FB7185"
 
 # Hero gradients: every page has its own colour identity
 GRADIENTS = {
+    "home": ("#4338CA", "#7C3AED", "#DB2777"),
     "dashboard": ("#6D28D9", "#2563EB", "#0891B2"),
     "invest": ("#047857", "#0D9488", "#2563EB"),
     "montecarlo": ("#C2410C", "#DB2777", "#7C3AED"),
@@ -57,7 +58,8 @@ STRAT_COLORS = {"bh": CYAN, "periodic": "#A78BFA", "diff": ORANGE}
 
 # Navigation: key -> (icon, label, accent colour)
 PAGES = {
-    "dashboard": ("📊", "Market Dashboard", VIOLET),
+    "home": ("🏠", "Main Dashboard", INDIGO),
+    "dashboard": ("📊", "Market Overview", VIOLET),
     "invest": ("💰", "Calculated Investment", EMERALD),
     "montecarlo": ("🎲", "Monte Carlo Simulation", ORANGE),
     "portfolio": ("💼", "Everyday Portfolio", CYAN),

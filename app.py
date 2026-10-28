@@ -16,6 +16,7 @@ st.set_page_config(
 
 from src.ui import apply_custom_css, hero, note, BAD  # noqa: E402  (after set_page_config)
 from src.asset_data import load_all_assets  # noqa: E402
+from src.home_page import render_home_page  # noqa: E402
 from src.dashboard_page import render_dashboard_page  # noqa: E402
 from src.investment_page import render_investment_page  # noqa: E402
 from src.monte_carlo_page import render_monte_carlo_page  # noqa: E402
@@ -41,15 +42,16 @@ if not asset_dfs:
 # Router
 # ---------------------------------------------------------
 PAGES = {
-    "dashboard": render_dashboard_page,
+    "home": render_home_page,              # 🏠 Main Dashboard (landing page)
+    "dashboard": render_dashboard_page,    # 📊 Market Overview (the old main dashboard)
     "invest": render_investment_page,
     "montecarlo": render_monte_carlo_page,
     "portfolio": render_everyday_portfolio_page,
 }
 
-view = st.session_state.get("view", "dashboard")
+view = st.session_state.get("view", "home")
 if view not in PAGES:
-    view = "dashboard"
+    view = "home"
 st.session_state["view"] = view
 
 PAGES[view](asset_dfs, fetch_errors)
