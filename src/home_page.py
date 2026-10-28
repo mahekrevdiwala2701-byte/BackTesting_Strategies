@@ -7,9 +7,10 @@ For every trading day from the first investment date, the whole portfolio (GoldB
 SmallCap by your weights) is bought and valued on the same date N years later.
 
 Layout (top to bottom):
-    1. Three strategy cards side by side: key numbers + bell curve
-    2. Line chart: return for every investment date, all 3 strategies
-    3. Year by year (left)  |  Portfolio vs each asset (right)
+    0. Plain-language summary strip (which strategy won, chance of profit, bad case)
+    1. Three strategy cards side by side: key numbers + histogram (% of start dates)
+    2. Line chart: profit/loss area for one strategy (or all 3), picked with a toggle
+    3. Year by year (left)  |  Range of outcomes: portfolio vs each asset (right)
     4. Comparison table (left)  |  CSV download + preview (right)
 """
 from datetime import date
@@ -28,7 +29,7 @@ from src.asset_data import ASSETS, ASSET_LABELS, ASSET_SHORT, ASSET_ICONS, COLOR
 from src.period_picker import today_ist
 from src.strategies import REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS
 from src.yoy_returns import (STRATEGY_KEYS, STRATEGY_NAMES, strategy_yoy, summary_stats, yearly_summary,
-                             normal_curve, to_csv)
+                             to_csv)
 
 DEFAULT_START = date(2010, 1, 1)
 LOOKBACKS = {**LOOKBACK_OPTIONS, "2 Years": 24, "2.5 Years": 30}
@@ -120,6 +121,9 @@ def render_home_page(asset_dfs, fetch_errors):
     _data_check(table)
     stats = {k: summary_stats(table[f'{STRATEGY_NAMES[k]} Return (%)']) for k in STRATEGY_KEYS}
 
+    # ---------------- Row 0: plain-language summary ----------------
+    _verdict(stats, amount, years)
+
     # ---------------- Row 1: the 3 strategy dashboards ----------------
     lo = min(s['min'] for s in stats.values())
     hi = max(s['max'] for s in stats.values())
@@ -129,14 +133,24 @@ def render_home_page(asset_dfs, fetch_errors):
 
     # ---------------- Row 2: line chart ----------------
     with panel():
-        chart(_line_figure(table, years), key="yoy_line")
+        show = st.segmented_control(
+            "Show on the chart", ["Buy & Hold", "Rebalancing", "Different Weights", "All 3 together"],
+            default="Buy & Hold", key="yoy_line_show")
+        chart(_line_figure(table, years, show or "Buy & Hold"), key="yoy_line")
+        st.caption(f"**How to read:** each point is one start date. Its height is what you'd have earned if you "
+                   f"invested that day and checked again {_yrs(years)} later. Green = profit, red = loss. "
+                   f"Empty stretches = missing price data for at least one asset.")
 
     # ---------------- Row 3: year by year | portfolio vs assets ----------------
     c1, c2 = st.columns(2)
     with c1, panel():
-        chart(_yearly_figure(table), key="yoy_yearly")
+        chart(_yearly_figure(table, years), key="yoy_yearly")
+        st.caption("**How to read:** the average result for everyone who started investing in that year. "
+                   "Hover a bar to see how many of those start dates were profitable.")
     with c2, panel():
         chart(_vs_assets_figure(table, w_norm, stats, years), key="yoy_vs")
+        st.caption("**How to read:** the thick bar holds the middle 90% of outcomes, the thin line runs from "
+                   "the worst to the best case, and the dot is the average. A shorter bar = steadier returns.")
 
     # ---------------- Row 4: comparison table | CSV ----------------
     c1, c2 = st.columns([1.05, 1.2])
@@ -175,6 +189,30 @@ def _data_check(table):
             st.dataframe(df, hide_index=True, width="stretch", height=200)
 
 
+def _verdict(stats, amount, years):
+    """One-line answers to 'which strategy won?' and 'how risky was it?', in rupees."""
+    best = max(STRATEGY_KEYS, key=lambda k: stats[k]['mean'])
+    safest = max(STRATEGY_KEYS, key=lambda k: stats[k]['p5'])
+    s = stats[best]
+    cells = [
+        ("🏆 Highest average", f"{ICONS[best]} {STRATEGY_NAMES[best]}",
+         f"{pct(s['mean'])} → {inr(amount * (1 + s['mean'] / 100))} on {inr(amount)}"),
+        ("🛡️ Smallest bad-case loss", f"{ICONS[safest]} {STRATEGY_NAMES[safest]}",
+         f"1-in-20 worst case {pct(stats[safest]['p5'])}"),
+        ("🎯 Chance of profit", f"{s['pct_positive']:.0f} in 100 start dates",
+         f"made money after {_yrs(years)} ({STRATEGY_NAMES[best]})"),
+        ("⚖️ Gap between strategies", f"{max(x['mean'] for x in stats.values()) - min(x['mean'] for x in stats.values()):.1f} pts",
+         "difference in average return (small = they behave alike)"),
+    ]
+    html = "".join(
+        f'<div style="flex:1;min-width:200px;background:{hex_rgba("#8A94B3", .07)};border-radius:12px;padding:10px 14px">'
+        f'<div style="color:{MUTED};font-size:.74rem;text-transform:uppercase;letter-spacing:.04em">{l}</div>'
+        f'<div style="color:{TEXT};font-weight:800;font-size:1.08rem;margin:2px 0">{v}</div>'
+        f'<div style="color:{MUTED};font-size:.8rem">{d}</div></div>' for l, v, d in cells)
+    st.markdown(f'<div style="display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 14px">{html}</div>',
+                unsafe_allow_html=True)
+
+
 def _strategy_card(table, key, s, setting, amount, years, x_range):
     color = STRAT_COLORS[key]
     name = STRATEGY_NAMES[key]
@@ -182,44 +220,51 @@ def _strategy_card(table, key, s, setting, amount, years, x_range):
     cell = ('<div style="flex:1;min-width:0"><div style="color:{m};font-size:.72rem;text-transform:uppercase;'
             'letter-spacing:.04em">{l}</div><div style="color:{c};font-weight:700;font-size:1.05rem">{v}</div></div>')
     cells = "".join(cell.format(m=MUTED, l=lbl, c=c, v=v) for lbl, v, c in [
-        ("Positive", f"{s['pct_positive']:.1f}%", GOOD),
-        ("Average", pct(s['mean']), GOOD if s['mean'] >= 0 else BAD),
-        ("Worst", pct(s['min']), BAD),
-        ("Best", pct(s['max']), GOOD),
+        ("Profitable", f"{s['pct_positive']:.0f}%", GOOD),
+        ("Average", pct(s['mean'], 1), GOOD if s['mean'] >= 0 else BAD),
+        ("Worst", pct(s['min'], 1), BAD),
+        ("Best", pct(s['max'], 1), GOOD),
     ])
     st.markdown(
         f'<div style="border-left:3px solid {color};padding:2px 0 2px 10px;margin-bottom:6px">'
         f'<div style="font-weight:800;color:{TEXT};font-size:1.02rem">{ICONS[key]} {name}</div>'
         f'<div style="color:{MUTED};font-size:.78rem;line-height:1.35;min-height:2.7em">{setting}<br>'
-        f'avg gain {inr(gain, 0, sign=True)} on {inr(amount)}'
+        f'average result {inr(amount + gain, 0)} from {inr(amount)} ({inr(gain, 0, sign=True)})'
         f'</div></div><div style="display:flex;gap:8px;margin:4px 0 2px">{cells}</div>',
         unsafe_allow_html=True)
-    chart(_bell_figure(table[f'{name} Return (%)'], s, color, x_range), key=f"yoy_bell_{key}")
+    chart(_bell_figure(table[f'{name} Return (%)'], s, color, x_range, years), key=f"yoy_bell_{key}")
 
 
-def _bell_figure(r, s, color, x_range):
+def _bell_figure(r, s, color, x_range, years=1):
+    """Histogram: how many start dates ended with each return. Y = % of start dates (readable),
+    no fitted normal curve (real returns are lopsided, the curve misled more than it helped)."""
     lo, hi = x_range
-    bins = np.linspace(lo, hi, 46)
-    counts, edges = np.histogram(r, bins=bins)
-    width = edges[1] - edges[0]
+    step = max(1.0, round((hi - lo) / 35))                      # ~35 bars, edges on whole % steps
+    edges = np.arange(np.floor(lo / step) * step, hi + step, step)
+    counts, edges = np.histogram(r.dropna(), bins=edges)
+    share = counts / max(counts.sum(), 1) * 100
     centers = (edges[:-1] + edges[1:]) / 2
-    density = counts / max(counts.sum() * width, 1e-9)
-    fig = go.Figure()
-    fig.add_vrect(x0=s['mean'] - s['std'], x1=s['mean'] + s['std'], fillcolor=hex_rgba(color, 0.08), line_width=0)
-    fig.add_trace(go.Bar(
-        x=centers, y=density, width=width * 0.92, marker_color=[GOOD if c > 0 else BAD for c in centers],
-        marker_line_width=0, opacity=0.85, showlegend=False,
-        customdata=np.stack([edges[:-1], edges[1:], counts, counts / max(counts.sum(), 1) * 100], axis=1),
-        hovertemplate="%{customdata[0]:.1f}% to %{customdata[1]:.1f}%<br>%{customdata[2]:,} days "
-                      "(%{customdata[3]:.1f}%)<extra></extra>"))
-    x, y = normal_curve(s['mean'], s['std'], lo, hi)
-    fig.add_trace(go.Scatter(x=x, y=y, mode='lines', line=dict(color=color, width=2.6), hoverinfo='skip',
-                             showlegend=False))
-    fig.add_vline(x=0, line_color=FAINT, line_dash="dot")
-    fig.add_vline(x=s['mean'], line_color=color, line_width=1.6, annotation_text=f"mean {s['mean']:+.1f}%",
-                  annotation_position="top right", annotation_font=dict(color=color, size=11))
-    fig.update_layout(**PLOT_LAYOUT, height=H - 40, bargap=0, margin=dict(l=8, r=8, t=18, b=8),
-                      xaxis=dict(ticksuffix="%", range=[lo, hi]), yaxis=dict(showticklabels=False))
+    loss = share[centers < 0].sum()
+    fig = go.Figure(go.Bar(
+        x=centers, y=share, width=step * 0.9, marker_line_width=0,
+        marker_color=[hex_rgba(BAD, .85) if c < 0 else hex_rgba(GOOD, .85) for c in centers],
+        customdata=np.stack([edges[:-1], edges[1:], counts], axis=1), showlegend=False,
+        hovertemplate="Return %{customdata[0]:.0f}% to %{customdata[1]:.0f}%<br>"
+                      "%{customdata[2]:,} start dates (%{y:.1f}%)<extra></extra>"))
+    fig.add_vline(x=0, line_color=TEXT, line_width=1, line_dash="dot")
+    fig.add_vline(x=s['mean'], line_color=color, line_width=2,
+                  annotation_text=f"Average {s['mean']:+.1f}%", annotation_position="top right",
+                  annotation_font=dict(color=color, size=11))
+    top = share.max() * 1.18 if share.size else 1
+    fig.add_annotation(x=lo, y=top, xanchor="left", yanchor="top", showarrow=False,
+                       text=f"<b>{loss:.0f}%</b> lost money", font=dict(color=BAD, size=11))
+    fig.add_annotation(x=hi, y=top, xanchor="right", yanchor="top", showarrow=False,
+                       text=f"<b>{100 - loss:.0f}%</b> made money", font=dict(color=GOOD, size=11))
+    fig.update_layout(**PLOT_LAYOUT, height=H - 30, bargap=0, margin=dict(l=8, r=8, t=12, b=8),
+                      xaxis=dict(ticksuffix="%", range=[lo, hi], title=dict(text=f"Return after {_yrs(years)}",
+                                 font=dict(size=11, color=MUTED))),
+                      yaxis=dict(ticksuffix="%", range=[0, top], title=dict(text="% of start dates",
+                                 font=dict(size=11, color=MUTED))))
     return fig
 
 
@@ -229,27 +274,48 @@ def _with_gaps(table):
     gap = t.index.to_series().diff().dt.days > 10
     if not gap.any():
         return t
-    blanks = pd.DataFrame(index=t.index[gap] - pd.Timedelta(days=1), columns=t.columns)
+    before = t.index.to_series().shift(1)[gap] + pd.Timedelta(days=1)     # day after the last real point
+    after = t.index[gap] - pd.Timedelta(days=1)                            # day before data resumes
+    blanks = pd.DataFrame(index=pd.DatetimeIndex(list(before) + list(after)), columns=t.columns)
     return pd.concat([t, blanks]).sort_index()
 
 
-def _line_figure(table, years):
+def _line_figure(table, years, show="Buy & Hold"):
+    """One strategy: green area above 0 (profit), red below (loss).
+    'All 3 together': the 3 lines (they usually overlap, which itself tells you they behave alike)."""
     t = _with_gaps(table)
     fig = go.Figure()
-    for key in STRATEGY_KEYS:
-        name = STRATEGY_NAMES[key]
-        fig.add_trace(go.Scatter(x=t.index, y=t[f'{name} Return (%)'].astype(float), mode='lines', name=name,
-                                 connectgaps=False, line=dict(color=STRAT_COLORS[key], width=1.5),
-                                 hovertemplate=f"{name}: %{{y:+.2f}}%<extra></extra>"))
-    fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
-    fig.update_layout(**PLOT_LAYOUT, height=H, hovermode='x unified',
-                      title=f"Portfolio return after {_yrs(years)}, for every investment date",
-                      yaxis=dict(ticksuffix="%"),
+    if show in STRATEGY_NAMES.values():
+        y = t[f'{show} Return (%)'].astype(float)
+        # gap rows become 0 so the coloured areas close at the hole instead of bridging it
+        for part, c, label in ((y.where(y >= 0, 0).fillna(0), GOOD, "Profit"),
+                               (y.where(y < 0, 0).fillna(0), BAD, "Loss")):
+            fig.add_trace(go.Scatter(x=t.index, y=part, mode='lines', name=label, connectgaps=False,
+                                     line=dict(color=c, width=0.8), fill='tozeroy', fillcolor=hex_rgba(c, .30),
+                                     hoverinfo='skip', showlegend=False))
+        fig.add_trace(go.Scatter(x=t.index, y=y, mode='lines', name=show, connectgaps=False,
+                                 line=dict(color=TEXT, width=1.1),
+                                 hovertemplate=f"Invested %{{x|%d %b %Y}}<br>{show}: <b>%{{y:+.1f}}%</b>"
+                                               f" after {_yrs(years)}<extra></extra>"))
+        title = f"{show}: return after {_yrs(years)}, by the date you invested"
+    else:
+        for key in STRATEGY_KEYS:
+            name = STRATEGY_NAMES[key]
+            fig.add_trace(go.Scatter(x=t.index, y=t[f'{name} Return (%)'].astype(float), mode='lines', name=name,
+                                     connectgaps=False, line=dict(color=STRAT_COLORS[key], width=1.6),
+                                     hovertemplate=f"{name}: %{{y:+.1f}}%<extra></extra>"))
+        title = f"All 3 strategies: return after {_yrs(years)}, by the date you invested"
+    fig.add_hline(y=0, line_color=TEXT, line_width=1, line_dash="dot")
+    fig.update_layout(**PLOT_LAYOUT, height=H + 40, hovermode='x unified' if show not in STRATEGY_NAMES.values()
+                      else 'closest', title=title,
+                      xaxis=dict(title=dict(text="Date you invested", font=dict(size=11, color=MUTED))),
+                      yaxis=dict(ticksuffix="%", title=dict(text=f"Return {_yrs(years)} later",
+                                 font=dict(size=11, color=MUTED))),
                       legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
     return fig
 
 
-def _yearly_figure(table):
+def _yearly_figure(table, years=1):
     ys = yearly_summary(table)
     fig = go.Figure()
     for key in STRATEGY_KEYS:
@@ -257,33 +323,44 @@ def _yearly_figure(table):
         fig.add_trace(go.Bar(x=ys['Year'].astype(str), y=ys[f'{name} Avg (%)'], name=name,
                              marker_color=STRAT_COLORS[key], marker_line_width=0,
                              customdata=ys[f'{name} % Positive'],
-                             hovertemplate=f"{name} · invested in %{{x}}<br>average %{{y:+.2f}}%"
-                                           f" · %{{customdata:.0f}}% positive<extra></extra>"))
-    fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
-    fig.update_layout(**PLOT_LAYOUT, height=H, barmode='group', bargap=0.25, title="Year by year (average return)",
-                      yaxis=dict(ticksuffix="%"), xaxis=dict(type='category'),
-                      legend=dict(orientation='h', yanchor='top', y=-0.1, x=0), margin=dict(l=12, r=12, t=50, b=40))
+                             hovertemplate=f"{name} · started in %{{x}}<br>average %{{y:+.1f}}%"
+                                           f" · %{{customdata:.0f}}% of start dates profitable<extra></extra>"))
+    fig.add_hline(y=0, line_color=TEXT, line_width=1, line_dash="dot")
+    fig.update_layout(**PLOT_LAYOUT, height=H, barmode='group', bargap=0.25,
+                      title=f"Average {_yrs(years)} return, by the year you started",
+                      yaxis=dict(ticksuffix="%", title=dict(text="Average return", font=dict(size=11, color=MUTED))),
+                      xaxis=dict(type='category', title=dict(text="Year you invested", font=dict(size=11, color=MUTED))),
+                      legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='right', x=1),
+                      margin=dict(l=12, r=12, t=60, b=40))
     return fig
 
 
 def _vs_assets_figure(table, w_norm, stats, years):
-    curves = [(STRATEGY_NAMES[k], stats[k]['mean'], stats[k]['std'], STRAT_COLORS[k], 3.2) for k in STRATEGY_KEYS]
-    for a in w_norm:
-        r = table[f'{ASSET_SHORT[a]} Return (%)']
-        curves.append((ASSET_SHORT[a], r.mean(), r.std(), COLORS[a], 1.4))
-    lo = min(m - 3 * sd for _, m, sd, _, _ in curves)
-    hi = max(m + 3 * sd for _, m, sd, _, _ in curves)
+    """Range of outcomes for each strategy and each single asset (replaces the overlapping bell curves):
+    thin line = worst to best, thick bar = middle 90% (5th to 95th percentile), dot = average."""
+    rows = [(f"{ICONS[k]} {STRATEGY_NAMES[k]}", stats[k], STRAT_COLORS[k]) for k in STRATEGY_KEYS]
+    rows += [(f"{ASSET_ICONS[a]} {ASSET_SHORT[a]} only", summary_stats(table[f'{ASSET_SHORT[a]} Return (%)']),
+              COLORS[a]) for a in w_norm]
+    rows = rows[::-1]                                             # strategies at the top
+    names = [r[0] for r in rows]
     fig = go.Figure()
-    for name, m, sd, color, wd in curves:
-        x, y = normal_curve(m, sd, lo, hi)
-        is_asset = wd < 2
-        fig.add_trace(go.Scatter(x=x, y=y, mode='lines', name=name,
-                                 line=dict(color=color, width=wd, dash='dot' if is_asset else 'solid'),
-                                 hovertemplate=f"{name}: mean {m:+.1f}%, σ {sd:.1f}%<extra></extra>"))
-    fig.add_vline(x=0, line_color=FAINT, line_dash="dot")
-    fig.update_layout(**PLOT_LAYOUT, height=H, title=f"Portfolio vs each asset ({_yrs(years)} bell curves)",
-                      xaxis=dict(ticksuffix="%"), yaxis=dict(showticklabels=False),
-                      legend=dict(orientation='h', yanchor='top', y=-0.1, x=0), margin=dict(l=12, r=12, t=50, b=40))
+    for name, s, c in rows:
+        fig.add_trace(go.Scatter(x=[s['min'], s['max']], y=[name, name], mode='lines',
+                                 line=dict(color=hex_rgba(c, .55), width=2), hoverinfo='skip', showlegend=False))
+        fig.add_trace(go.Scatter(x=[s['p5'], s['p95']], y=[name, name], mode='lines',
+                                 line=dict(color=c, width=14), showlegend=False,
+                                 hovertemplate=f"<b>{name}</b><br>worst {s['min']:+.1f}% · best {s['max']:+.1f}%<br>"
+                                               f"middle 90%: {s['p5']:+.1f}% to {s['p95']:+.1f}%<br>"
+                                               f"average {s['mean']:+.1f}% · profitable {s['pct_positive']:.0f}%"
+                                               f"<extra></extra>"))
+        fig.add_trace(go.Scatter(x=[s['mean']], y=[name], mode='markers', showlegend=False, hoverinfo='skip',
+                                 marker=dict(color=TEXT, size=9, line=dict(color="#0A0F1E", width=2))))
+    fig.add_vline(x=0, line_color=TEXT, line_width=1, line_dash="dot")
+    fig.update_layout(**PLOT_LAYOUT, height=H, title=f"Portfolio vs each asset alone: range of {_yrs(years)} results",
+                      xaxis=dict(ticksuffix="%", title=dict(text=f"Return after {_yrs(years)}",
+                                 font=dict(size=11, color=MUTED))),
+                      yaxis=dict(categoryorder='array', categoryarray=names),
+                      margin=dict(l=12, r=12, t=50, b=40))
     return fig
 
 
