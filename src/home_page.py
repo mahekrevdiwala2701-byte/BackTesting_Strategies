@@ -36,26 +36,35 @@ PORT_COLOR = VIOLET
 ZOOM_CONFIG = {
     "displaylogo": False,
     "scrollZoom": False,                                   # mouse wheel scrolls the PAGE, never zooms
+    "responsive": True,                                    # re-measure the chart when the window changes
     "doubleClick": "reset",                                # double-click = back to the full view
     "modeBarButtonsToRemove": ["lasso2d", "select2d", "zoomIn2d", "zoomOut2d", "autoScale2d"],
 }
 
 
 def _chart(fig, key=None, height=None):
-    """Show a chart that zooms properly:
-    - drag a box and it zooms exactly on that part, left-right only (the mouse wheel just scrolls the page),
-      so the curves keep their shape;
-    - no slide animation while zooming;
-    - double-click (or the house button) brings back the full view;
-    - the zoom stays put when the page refreshes after a setting change in the sidebar."""
+    """Show a chart whose box-zoom lands exactly where you drag:
+    - drag a rectangle with the zoom tool and it zooms into exactly that rectangle;
+    - no slide/fade animation on the chart or its panel (CSS transforms on a parent make Plotly
+      put the zoom in the wrong place on some screens);
+    - the mouse wheel scrolls the page, it never zooms;
+    - double-click (or the house button) brings back the full view."""
     if height:
         fig.update_layout(height=height)
-    # uirevision keeps the user's zoom across reruns, but a new slider range always takes over
     fig.update_layout(transition=dict(duration=0), dragmode="zoom",
                       uirevision=f"{key}|{fig.layout.xaxis.range}")
     fig.update_xaxes(fixedrange=False)
-    fig.update_yaxes(fixedrange=True)                      # zoom only left-right
+    fig.update_yaxes(fixedrange=False)
     st.plotly_chart(fig, theme=None, width="stretch", key=key, config=ZOOM_CONFIG)
+
+
+_NO_ANIMATION_CSS = """<style>
+/* Charts on this page: no animations or transforms around them, so zoom/pan coordinates are exact */
+[data-testid="stPlotlyChart"], [class*="st-key-panel_"], [data-testid="stVerticalBlockBorderWrapper"] {
+  animation: none !important; transform: none !important;
+}
+</style>"""
+
 
 def _zoom_slider(lo, hi, key, label="🔍 Zoom: show returns from / to"):
     """A slider that sets the visible return range of a chart, so zooming is exact and predictable."""
@@ -75,6 +84,8 @@ def _yrs(y):
 # =========================================================
 def render_home_page(asset_dfs, fetch_errors):
     available = [a for a in ASSETS if a in asset_dfs]
+
+    st.markdown(_NO_ANIMATION_CSS, unsafe_allow_html=True)
 
     # ---------------- Sidebar ----------------
     sidebar_nav("home")
