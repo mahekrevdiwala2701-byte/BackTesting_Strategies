@@ -437,4 +437,3 @@ def _data_tab(table, years):
         st.download_button("⬇️  Download CSV", to_csv(table), type="primary", width="stretch",
                            file_name=f"portfolio_same_date_{years}y_returns.csv", mime="text/csv",
                            key="yoy_dl_main")
-    _show_table(table)
