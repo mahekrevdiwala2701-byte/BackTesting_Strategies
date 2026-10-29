@@ -316,11 +316,10 @@ def _sign_color(v):
     return GOOD if v >= 0 else BAD
 
 
-def _yearly_tab(table):
-    ys = yearly_summary(table, financial=True)            # financial years: April to March
-    yr = ys['Year'].str.replace('FY ', '', regex=False)    # '2010-11' = April 2010 to March 2011
+def _year_figure(ys, title):
+    """Bar = average return of the year; ▲ best / ▼ worst return, green if a gain, red if a loss."""
+    yr = ys['Year'].str.replace('FY ', '', regex=False)
     d = lambda col: ys[col].dt.strftime('%d-%m-%Y')       # noqa: E731
-    ds = lambda col: ys[col].dt.strftime('%d-%m-%y')      # noqa: E731  (short, for the table)
     span = d('From') + " to " + d('To')
 
     fig = go.Figure()
@@ -331,7 +330,6 @@ def _yearly_tab(table):
         customdata=np.stack([span, ys['Days compared'], ys['% Positive']], axis=1),
         hovertemplate="<b>%{x}</b> (invested %{customdata[0]})<br>average %{y:+.2f}% · "
                       "%{customdata[1]} days · %{customdata[2]:.0f}% positive<extra></extra>"))
-    # Best / worst markers: green when the return is a gain, red when it is a loss
     for label, col, symbol in (("Best", 'Best', 'triangle-up'), ("Worst", 'Worst', 'triangle-down')):
         vals = ys[f'{col} (%)']
         fig.add_trace(go.Scatter(
@@ -342,41 +340,24 @@ def _yearly_tab(table):
             hovertemplate=f"<b>%{{x}}</b> · {label.lower()} %{{y:+.2f}}%<br>"
                           "invested %{customdata[0]} → valued %{customdata[1]}<extra></extra>"))
     fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
-    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, title="Return by financial year (April to March)",
+    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, title=title,
                       yaxis=dict(ticksuffix="%"), xaxis=dict(type='category', tickangle=-45),
                       legend=dict(orientation='h', yanchor='top', y=-0.22, x=0),
                       margin=dict(l=12, r=12, t=50, b=60))
+    return fig
 
-    shown = pd.DataFrame({
-        'FY': yr,
-        'Days': ys['Days compared'],
-        '+ve': ys['% Positive'],
-        'Average (%)': ys['Average (%)'],
-        'Worst (%)': ys['Worst (%)'],
-        'Worst on': ds('Worst Invest Date'),
-        'Best (%)': ys['Best (%)'],
-        'Best on': ds('Best Invest Date'),
-    })
-    signed = ['Average (%)', 'Worst (%)', 'Best (%)']
-    fmt = {c: '{:+.1f}%' for c in signed}
-    fmt['+ve'] = '{:.0f}%'
 
-    c1, c2 = st.columns([1, 1.2])
+def _yearly_tab(table):
+    fy = yearly_summary(table, financial=True)            # April to March
+    cy = yearly_summary(table, financial=False)           # January to December
+    c1, c2 = st.columns(2)
     with c1, panel():
-        chart(fig, key="yoy_yearly")
-    with c2:
-        st.dataframe(style_change_cols(shown.style.format(fmt), signed), width="stretch", hide_index=True,
-                     height=CHART_H - 50)
-        csv = ys.copy()
-        for c in csv.columns:
-            if pd.api.types.is_datetime64_any_dtype(csv[c]):
-                csv[c] = csv[c].dt.strftime('%d-%m-%Y')
-        st.download_button("⬇️  Download year-wise CSV", csv.round(3).to_csv(index=False).encode('utf-8-sig'),
-                           file_name="portfolio_financial_year_summary.csv", mime="text/csv", key="yoy_dl_year",
-                           width="stretch")
-    st.caption("Financial year = 1 April to 31 March (FY 2010-11 = investments from 01-04-2010 to 31-03-2011). "
-               "Triangles: ▲ best and ▼ worst return in that year, green if it was a gain, red if a loss. "
-               "Hover for the exact dates. The first and last years can be partial (see Days).")
+        chart(_year_figure(fy, "Financial year (April to March)"), key="yoy_yearly_fy")
+    with c2, panel():
+        chart(_year_figure(cy, "Calendar year (January to December)"), key="yoy_yearly_cy")
+    st.caption("Bar = average return for investments made in that year. ▲ best and ▼ worst return in that year: "
+               "green if it was a gain, red if a loss. Hover for the exact dates. Financial year 2010-11 = "
+               "01-04-2010 to 31-03-2011. The first and last years can be partial.")
 
 
 # =========================================================
