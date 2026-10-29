@@ -35,7 +35,7 @@ PORT_COLOR = VIOLET
 # =========================================================
 ZOOM_CONFIG = {
     "displaylogo": False,
-    "scrollZoom": True,                                    # mouse wheel zooms where the pointer is
+    "scrollZoom": False,                                   # mouse wheel scrolls the PAGE, never zooms
     "doubleClick": "reset",                                # double-click = back to the full view
     "modeBarButtonsToRemove": ["lasso2d", "select2d", "zoomIn2d", "zoomOut2d", "autoScale2d"],
 }
@@ -43,17 +43,28 @@ ZOOM_CONFIG = {
 
 def _chart(fig, key=None, height=None):
     """Show a chart that zooms properly:
-    - drag a box (or use the mouse wheel) and it zooms exactly on that part, left-right only,
+    - drag a box and it zooms exactly on that part, left-right only (the mouse wheel just scrolls the page),
       so the curves keep their shape;
     - no slide animation while zooming;
     - double-click (or the house button) brings back the full view;
     - the zoom stays put when the page refreshes after a setting change in the sidebar."""
     if height:
         fig.update_layout(height=height)
-    fig.update_layout(transition=dict(duration=0), dragmode="zoom", uirevision=key or True)
+    # uirevision keeps the user's zoom across reruns, but a new slider range always takes over
+    fig.update_layout(transition=dict(duration=0), dragmode="zoom",
+                      uirevision=f"{key}|{fig.layout.xaxis.range}")
     fig.update_xaxes(fixedrange=False)
     fig.update_yaxes(fixedrange=True)                      # zoom only left-right
     st.plotly_chart(fig, theme=None, width="stretch", key=key, config=ZOOM_CONFIG)
+
+def _zoom_slider(lo, hi, key, label="🔍 Zoom: show returns from / to"):
+    """A slider that sets the visible return range of a chart, so zooming is exact and predictable."""
+    lo, hi = float(np.floor(lo / 5) * 5), float(np.ceil(hi / 5) * 5)
+    if hi <= lo:
+        return None
+    a, b = st.slider(label, min_value=lo, max_value=hi, value=(lo, hi), step=1.0, format="%d%%", key=key)
+    return [a, b] if (a, b) != (lo, hi) else None
+
 
 def _yrs(y):
     return f"{y} year" + ("s" if y > 1 else "")
@@ -264,8 +275,12 @@ def _bell_tab(table, s, years):
     within1 = ((r >= s['mean'] - s['std']) & (r <= s['mean'] + s['std'])).mean() * 100
     c1, c2 = st.columns([3, 1], vertical_alignment="center")
     with c1, panel():
-        _chart(_bell_figure(r, s['mean'], s['std'], "#C4B5FD",
-                           f"Total portfolio: {_yrs(years)} same-date returns", height=CHART_H), key="yoy_bell")
+        rng = _zoom_slider(r.min(), r.max(), key="zoom_bell")
+        fig = _bell_figure(r, s['mean'], s['std'], "#C4B5FD",
+                           f"Total portfolio: {_yrs(years)} same-date returns", height=CHART_H)
+        if rng:
+            fig.update_xaxes(range=rng, autorange=False)
+        _chart(fig, key="yoy_bell")
     with c2:
         _mini_stats([
             ("Positive", f"{s['pct_positive']:.1f}%", GOOD),
@@ -428,6 +443,9 @@ def _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_
 
     c1, c2 = st.columns(2)
     with c1, panel():
+        rng = _zoom_slider(lo, hi, key="zoom_vs_bell")
+        if rng:
+            fig.update_xaxes(range=rng, autorange=False)
         _chart(fig, key="yoy_vs_bell")
     with c2, panel():
         _chart(fig2, key="yoy_vs_line")
