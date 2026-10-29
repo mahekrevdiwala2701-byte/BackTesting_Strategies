@@ -205,21 +205,46 @@ def summary_stats(table):
     }
 
 
-def yearly_summary(table):
-    """One row per investment year: how many dates were positive / negative and the range of returns."""
+def financial_year(dates):
+    """Indian financial year (April to March) of each date, e.g. 15-05-2010 and 10-02-2011 -> 'FY 2010-11'."""
+    d = pd.to_datetime(pd.Series(dates))
+    start = d.dt.year - (d.dt.month < 4).astype(int)
+    return 'FY ' + start.astype(str) + '-' + ((start + 1) % 100).astype(str).str.zfill(2)
+
+
+def yearly_summary(table, financial=True):
+    """One row per investment year: days compared, % positive, average, and the worst / best return
+    together with the investment date and compare date on which each happened.
+
+    financial=True  -> years run April to March (FY 2010-11 = 01-04-2010 to 31-03-2011)
+    financial=False -> calendar years (January to December)
+    """
     if table is None or table.empty:
         return pd.DataFrame()
-    g = table.groupby('Invest Year')['Return (%)']
-    return pd.DataFrame({
-        'Days compared': g.size(),
-        'Positive days': g.apply(lambda s: int((s > 0).sum())),
-        'Negative days': g.apply(lambda s: int((s < 0).sum())),
-        '% Positive': g.apply(lambda s: (s > 0).mean() * 100),
-        'Average (%)': g.mean(),
-        'Median (%)': g.median(),
-        'Worst (%)': g.min(),
-        'Best (%)': g.max(),
-    }).reset_index()
+    t = table.copy()
+    t['Year'] = financial_year(t['Invest Date']).values if financial else t['Invest Date'].dt.year.astype(str).values
+    rows = []
+    for year, g in t.groupby('Year', sort=True):
+        r = g['Return (%)']
+        worst, best = g.loc[r.idxmin()], g.loc[r.idxmax()]
+        rows.append({
+            'Year': year,
+            'From': g['Invest Date'].min(),
+            'To': g['Invest Date'].max(),
+            'Days compared': int(r.size),
+            'Positive days': int((r > 0).sum()),
+            'Negative days': int((r < 0).sum()),
+            '% Positive': (r > 0).mean() * 100,
+            'Average (%)': r.mean(),
+            'Median (%)': r.median(),
+            'Worst (%)': worst['Return (%)'],
+            'Worst Invest Date': worst['Invest Date'],
+            'Worst Compare Date': worst['Compare Date'],
+            'Best (%)': best['Return (%)'],
+            'Best Invest Date': best['Invest Date'],
+            'Best Compare Date': best['Compare Date'],
+        })
+    return pd.DataFrame(rows)
 
 
 def normal_curve(mean, std, lo, hi, n=400):

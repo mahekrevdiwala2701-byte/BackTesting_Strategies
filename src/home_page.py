@@ -311,40 +311,72 @@ def _line_tab(table, years):
 # =========================================================
 # Year by year
 # =========================================================
+def _sign_color(v):
+    """Green for a gain (or 0), red for a loss."""
+    return GOOD if v >= 0 else BAD
+
+
 def _yearly_tab(table):
-    ys = yearly_summary(table)
-    yr = ys['Invest Year'].astype(str)
+    ys = yearly_summary(table, financial=True)            # financial years: April to March
+    yr = ys['Year'].str.replace('FY ', '', regex=False)    # '2010-11' = April 2010 to March 2011
+    d = lambda col: ys[col].dt.strftime('%d-%m-%Y')       # noqa: E731
+    ds = lambda col: ys[col].dt.strftime('%d-%m-%y')      # noqa: E731  (short, for the table)
+    span = d('From') + " to " + d('To')
+
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=yr, y=ys['Average (%)'], name="Average",
-                         marker_color=[GOOD if v > 0 else BAD for v in ys['Average (%)']], marker_line_width=0,
-                         text=[f"{v:+.1f}%" for v in ys['Average (%)']], textposition='outside',
-                         hovertemplate="Invested in %{x}<br>average %{y:+.2f}%<extra></extra>"))
-    fig.add_trace(go.Scatter(x=yr, y=ys['Best (%)'], mode='markers', name="Best",
-                             marker=dict(color=GOOD, symbol='triangle-up', size=9),
-                             hovertemplate="best %{y:+.2f}%<extra></extra>"))
-    fig.add_trace(go.Scatter(x=yr, y=ys['Worst (%)'], mode='markers', name="Worst",
-                             marker=dict(color=BAD, symbol='triangle-down', size=9),
-                             hovertemplate="worst %{y:+.2f}%<extra></extra>"))
+    fig.add_trace(go.Bar(
+        x=yr, y=ys['Average (%)'], name="Average",
+        marker_color=[_sign_color(v) for v in ys['Average (%)']], marker_line_width=0, opacity=0.85,
+        text=[f"{v:+.1f}%" for v in ys['Average (%)']], textposition='outside',
+        customdata=np.stack([span, ys['Days compared'], ys['% Positive']], axis=1),
+        hovertemplate="<b>%{x}</b> (invested %{customdata[0]})<br>average %{y:+.2f}% · "
+                      "%{customdata[1]} days · %{customdata[2]:.0f}% positive<extra></extra>"))
+    # Best / worst markers: green when the return is a gain, red when it is a loss
+    for label, col, symbol in (("Best", 'Best', 'triangle-up'), ("Worst", 'Worst', 'triangle-down')):
+        vals = ys[f'{col} (%)']
+        fig.add_trace(go.Scatter(
+            x=yr, y=vals, mode='markers', name=label,
+            marker=dict(color=[_sign_color(v) for v in vals], symbol=symbol, size=11,
+                        line=dict(color="#FFFFFF", width=1)),
+            customdata=np.stack([d(f'{col} Invest Date'), d(f'{col} Compare Date')], axis=1),
+            hovertemplate=f"<b>%{{x}}</b> · {label.lower()} %{{y:+.2f}}%<br>"
+                          "invested %{customdata[0]} → valued %{customdata[1]}<extra></extra>"))
     fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
-    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, title="Return by investment year",
-                      yaxis=dict(ticksuffix="%"), xaxis=dict(type='category'),
-                      legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0.45))
+    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, title="Return by financial year (April to March)",
+                      yaxis=dict(ticksuffix="%"), xaxis=dict(type='category', tickangle=-45),
+                      legend=dict(orientation='h', yanchor='top', y=-0.22, x=0),
+                      margin=dict(l=12, r=12, t=50, b=60))
 
+    shown = pd.DataFrame({
+        'FY': yr,
+        'Days': ys['Days compared'],
+        '+ve': ys['% Positive'],
+        'Average (%)': ys['Average (%)'],
+        'Worst (%)': ys['Worst (%)'],
+        'Worst on': ds('Worst Invest Date'),
+        'Best (%)': ys['Best (%)'],
+        'Best on': ds('Best Invest Date'),
+    })
     signed = ['Average (%)', 'Worst (%)', 'Best (%)']
-    shown = ys.rename(columns={'Invest Year': 'Year', 'Days compared': 'Days'})[
-        ['Year', 'Days', '% Positive'] + signed]
     fmt = {c: '{:+.1f}%' for c in signed}
-    fmt['% Positive'] = '{:.0f}%'
+    fmt['+ve'] = '{:.0f}%'
 
-    c1, c2 = st.columns([1.25, 1])
+    c1, c2 = st.columns([1, 1.2])
     with c1, panel():
         chart(fig, key="yoy_yearly")
     with c2:
         st.dataframe(style_change_cols(shown.style.format(fmt), signed), width="stretch", hide_index=True,
                      height=CHART_H - 50)
-        st.download_button("⬇️  Download year-wise CSV", ys.round(3).to_csv(index=False).encode('utf-8-sig'),
-                           file_name="portfolio_yearwise_summary.csv", mime="text/csv", key="yoy_dl_year",
+        csv = ys.copy()
+        for c in csv.columns:
+            if pd.api.types.is_datetime64_any_dtype(csv[c]):
+                csv[c] = csv[c].dt.strftime('%d-%m-%Y')
+        st.download_button("⬇️  Download year-wise CSV", csv.round(3).to_csv(index=False).encode('utf-8-sig'),
+                           file_name="portfolio_financial_year_summary.csv", mime="text/csv", key="yoy_dl_year",
                            width="stretch")
+    st.caption("Financial year = 1 April to 31 March (FY 2010-11 = investments from 01-04-2010 to 31-03-2011). "
+               "Triangles: ▲ best and ▼ worst return in that year, green if it was a gain, red if a loss. "
+               "Hover for the exact dates. The first and last years can be partial (see Days).")
 
 
 # =========================================================
