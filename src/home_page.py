@@ -16,7 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.ui import (
-    panel, chart, hero, section, kpi_row, note, sidebar_nav, sidebar_footer, sidebar_label, weight_badge,
+    panel, hero, section, kpi_row, note, sidebar_nav, sidebar_footer, sidebar_label, weight_badge,
     tone_of, inr, pct, hex_rgba,
     PLOT_LAYOUT, VIOLET, CYAN, AMBER, PINK, GOOD, BAD, FAINT, MUTED, INK,
 )
@@ -28,6 +28,32 @@ from src.yoy_returns import (same_date_returns, portfolio_same_date_returns, sum
 DEFAULT_START = date(2010, 1, 1)
 PORT_COLOR = VIOLET
 
+
+
+# =========================================================
+# Zoom-friendly charts
+# =========================================================
+ZOOM_CONFIG = {
+    "displaylogo": False,
+    "scrollZoom": True,                                    # mouse wheel zooms where the pointer is
+    "doubleClick": "reset",                                # double-click = back to the full view
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "zoomIn2d", "zoomOut2d", "autoScale2d"],
+}
+
+
+def _chart(fig, key=None, height=None):
+    """Show a chart that zooms properly:
+    - drag a box (or use the mouse wheel) and it zooms exactly on that part, left-right only,
+      so the curves keep their shape;
+    - no slide animation while zooming;
+    - double-click (or the house button) brings back the full view;
+    - the zoom stays put when the page refreshes after a setting change in the sidebar."""
+    if height:
+        fig.update_layout(height=height)
+    fig.update_layout(transition=dict(duration=0), dragmode="zoom", uirevision=key or True)
+    fig.update_xaxes(fixedrange=False)
+    fig.update_yaxes(fixedrange=True)                      # zoom only left-right
+    st.plotly_chart(fig, theme=None, width="stretch", key=key, config=ZOOM_CONFIG)
 
 def _yrs(y):
     return f"{y} year" + ("s" if y > 1 else "")
@@ -238,7 +264,7 @@ def _bell_tab(table, s, years):
     within1 = ((r >= s['mean'] - s['std']) & (r <= s['mean'] + s['std'])).mean() * 100
     c1, c2 = st.columns([3, 1], vertical_alignment="center")
     with c1, panel():
-        chart(_bell_figure(r, s['mean'], s['std'], "#C4B5FD",
+        _chart(_bell_figure(r, s['mean'], s['std'], "#C4B5FD",
                            f"Total portfolio: {_yrs(years)} same-date returns", height=CHART_H), key="yoy_bell")
     with c2:
         _mini_stats([
@@ -303,7 +329,7 @@ def _line_tab(table, years):
                       xaxis=dict(rangeslider=dict(visible=True, thickness=0.05)),
                       legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0.55))
     with panel():
-        chart(fig, key="yoy_line")
+        _chart(fig, key="yoy_line")
     st.caption("Green = that investment date made money after the holding period, red = it lost money. "
                "Drag the slider under the chart to zoom.")
 
@@ -352,9 +378,9 @@ def _yearly_tab(table):
     cy = yearly_summary(table, financial=False)           # January to December
     c1, c2 = st.columns(2)
     with c1, panel():
-        chart(_year_figure(fy, "Financial year (April to March)"), key="yoy_yearly_fy")
+        _chart(_year_figure(fy, "Financial year (April to March)"), key="yoy_yearly_fy")
     with c2, panel():
-        chart(_year_figure(cy, "Calendar year (January to December)"), key="yoy_yearly_cy")
+        _chart(_year_figure(cy, "Calendar year (January to December)"), key="yoy_yearly_cy")
     st.caption("Bar = average return for investments made in that year. ▲ best and ▼ worst return in that year: "
                "green if it was a gain, red if a loss. Hover for the exact dates. Financial year 2010-11 = "
                "01-04-2010 to 31-03-2011. The first and last years can be partial.")
@@ -402,9 +428,9 @@ def _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_
 
     c1, c2 = st.columns(2)
     with c1, panel():
-        chart(fig, key="yoy_vs_bell")
+        _chart(fig, key="yoy_vs_bell")
     with c2, panel():
-        chart(fig2, key="yoy_vs_line")
+        _chart(fig2, key="yoy_vs_line")
 
     rows = []
     for name, (r, _) in series.items():
