@@ -5,25 +5,29 @@ Portfolio = GoldBEES + Nifty 50 + MidCap + SmallCap, always all 4 (weights chang
 "If I had invested ₹1,00,000 in the portfolio on 01-01-2010, what was it worth on 01-01-2011?
  If I had invested on 02-01-2010, what was it worth on 02-01-2011?"  ... for every day of every year.
 
-Shows: headline numbers, a bell curve (distribution of all portfolio returns), a line curve (return for
-every investment date), a year-wise table, a single-date lookup, portfolio vs each asset, CSV downloads.
+Shows: headline numbers, monthly alpha of the portfolio (Buy & Hold / Rebalance / Different Weights)
+against a benchmark, a bell curve (distribution of all portfolio returns), a line curve
+(return for every investment date), a year-wise table, portfolio vs each asset, CSV downloads.
 """
 from datetime import date
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from src.ui import (
-    panel, hero, section, kpi_row, note, sidebar_nav, sidebar_footer, sidebar_label, weight_badge,
+    panel, hero, section, kpi_row, note, explain, sidebar_nav, sidebar_footer, sidebar_label, weight_badge,
     tone_of, inr, pct, hex_rgba,
-    PLOT_LAYOUT, VIOLET, CYAN, AMBER, PINK, GOOD, BAD, FAINT, MUTED, INK,
+    PLOT_LAYOUT, STRAT_COLORS, VIOLET, CYAN, AMBER, PINK, BLUE, GOOD, BAD, FAINT, MUTED, INK,
 )
 from src.asset_data import ASSETS, ASSET_SHORT, ASSET_ICONS, COLORS, style_change_cols, blank_missing
 from src.period_picker import today_ist
 from src.yoy_returns import (same_date_returns, portfolio_same_date_returns, summary_stats, yearly_summary,
                              normal_curve, to_csv)
+from src.alpha import calculated_investment_values, benchmark_close, monthly_alpha, alpha_summary
+from src.strategies import STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS
 
 DEFAULT_START = date(2010, 1, 1)
 PORT_COLOR = VIOLET
@@ -64,15 +68,6 @@ _NO_ANIMATION_CSS = """<style>
   animation: none !important; transform: none !important;
 }
 </style>"""
-
-
-def _zoom_slider(lo, hi, key, label="🔍 Zoom: show returns from / to"):
-    """A slider that sets the visible return range of a chart, so zooming is exact and predictable."""
-    lo, hi = float(np.floor(lo / 5) * 5), float(np.ceil(hi / 5) * 5)
-    if hi <= lo:
-        return None
-    a, b = st.slider(label, min_value=lo, max_value=hi, value=(lo, hi), step=1.0, format="%d%%", key=key)
-    return [a, b] if (a, b) != (lo, hi) else None
 
 
 def _yrs(y):
@@ -167,6 +162,9 @@ def render_home_page(asset_dfs, fetch_errors):
 
     stats = summary_stats(table)
     _headline(stats, table, amount, w_norm)
+
+    section("Alpha", "Pick a strategy and see how much the portfolio beat the benchmark every month", "🎯", AMBER)
+    _alpha_tab(asset_dfs, w_norm, amount, from_date, to_date)
 
     # ---------------- Charts & tables ----------------
     # All results on one page, one after another (no tabs)
@@ -286,11 +284,8 @@ def _bell_tab(table, s, years):
     within1 = ((r >= s['mean'] - s['std']) & (r <= s['mean'] + s['std'])).mean() * 100
     c1, c2 = st.columns([3, 1], vertical_alignment="center")
     with c1, panel():
-        rng = _zoom_slider(r.min(), r.max(), key="zoom_bell")
         fig = _bell_figure(r, s['mean'], s['std'], "#C4B5FD",
                            f"Total portfolio: {_yrs(years)} same-date returns", height=CHART_H)
-        if rng:
-            fig.update_xaxes(range=rng, autorange=False)
         _chart(fig, key="yoy_bell")
     with c2:
         _mini_stats([
@@ -454,9 +449,6 @@ def _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_
 
     c1, c2 = st.columns(2)
     with c1, panel():
-        rng = _zoom_slider(lo, hi, key="zoom_vs_bell")
-        if rng:
-            fig.update_xaxes(range=rng, autorange=False)
         _chart(fig, key="yoy_vs_bell")
     with c2, panel():
         _chart(fig2, key="yoy_vs_line")
@@ -472,6 +464,140 @@ def _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_
     fmt = {c: '{:+.2f}%' for c in signed}
     fmt.update({'% Positive': '{:.1f}%', 'Std dev (%)': '{:.2f}%'})
     st.dataframe(style_change_cols(summ.style.format(fmt), signed), width="stretch", hide_index=True)
+
+
+# =========================================================
+# Alpha: whole portfolio vs one benchmark, every month
+# =========================================================
+STRATEGY_HELP = {
+    "bh": "Money is split once and never touched again. Each asset is bought on its own first trading "
+          "day in the period (if an asset's data starts later, its share waits as cash until then). "
+          "Weights drift as prices move.",
+    "periodic": "Money is split on the first day, then every month / quarter / half-year / year the portfolio "
+                "is brought back to your target weights (sell what grew, buy what fell).",
+    "diff": "First buy uses your weights. On every rebalance date each asset's growth over the previous "
+            "look-back period is compared: the asset that grew the MOST gets the SMALLEST of your weights, "
+            "and the one that grew the LEAST (or fell) gets the BIGGEST.",
+}
+LOOKBACKS = {**LOOKBACK_OPTIONS, "2 Years": 24, "2.5 Years": 30}
+
+
+def _alpha_portfolio(asset_dfs, w_norm, amount, from_date, to_date):
+    """Strategy dropdown and its conditions. Returns (portfolio value every day, benchmark, description)."""
+    avail = [a for a in ASSETS if a in asset_dfs]
+    with panel():
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            mode = st.selectbox("🧭 Strategy", list(STRATEGIES), format_func=STRATEGIES.get, key="al_mode")
+        with c2:
+            bench = st.selectbox("📏 Compare with (benchmark)", avail, key="al_bench",
+                                 index=avail.index('LargeCap') if 'LargeCap' in avail else 0,
+                                 format_func=lambda a: f"{ASSET_ICONS[a]} {ASSET_SHORT[a]}")
+        explain(STRATEGY_HELP[mode], STRAT_COLORS[mode])
+
+        freq_m, look_m, extra = 1, 12, ""
+        if mode == "periodic":
+            f = st.selectbox("🔁 Rebalance every", list(REBAL_FREQ), index=1, key="al_rebal_freq")
+            freq_m, extra = REBAL_FREQ[f], f" · rebalanced {f.lower()}"
+        elif mode == "diff":
+            lb = st.radio("🔍 Compare growth over the previous", list(LOOKBACKS), index=1, horizontal=True,
+                          key="al_diff_lookback")
+            f = st.radio("🔁 Rebalance every", list(DIFF_REBAL_FREQ), index=0, horizontal=True, key="al_diff_freq")
+            freq_m, look_m = DIFF_REBAL_FREQ[f], LOOKBACKS[lb]
+            extra = f" · {f.lower()}, growth over the previous {lb}"
+
+        mix = " · ".join(f"{ASSET_SHORT[a]} {w * 100:.0f}%" for a, w in w_norm.items())
+        note(f"Weights, amount and dates come from the sidebar: <b>{mix}</b>, {inr(amount)}, "
+             f"<b>{from_date:%d-%m-%Y}</b> to <b>{to_date:%d-%m-%Y}</b>.", BLUE, "👈")
+
+    values = calculated_investment_values(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m)
+    return values, bench, f"{STRATEGIES[mode]}{extra} ({mix})"
+
+
+def _alpha_tab(asset_dfs, w_norm, amount, from_date, to_date):
+    values, bench, desc = _alpha_portfolio(asset_dfs, w_norm, amount, from_date, to_date)
+    if values is None:
+        note("Not enough price data for these dates. Pick a longer period in the sidebar.", AMBER, "⚠️")
+        return
+
+    m = monthly_alpha(values, benchmark_close(asset_dfs, bench))
+    s = alpha_summary(m)
+    if not s:
+        note("Not enough price data for these dates. Pick a longer period.", AMBER, "⚠️")
+        return
+    b_name = ASSET_SHORT[bench]
+    st_, en = m.attrs['start'], m.attrs['end']
+
+    # ---------- cards ----------
+    kpi_row([
+        dict(label=f"Total alpha vs {b_name}", value=pct(s['alpha_total']),
+             delta=f"{inr(s['alpha_rupees'], 0, sign=True)} more than in {b_name}", tone=tone_of(s['alpha_total']),
+             icon="🎯", accent=GOOD if s['alpha_total'] >= 0 else BAD),
+        dict(label="Alpha a year", value=pct(s['port_cagr'] - s['bench_cagr']),
+             delta=f"portfolio {pct(s['port_cagr'])} · {b_name} {pct(s['bench_cagr'])} a year",
+             tone=tone_of(s['port_cagr'] - s['bench_cagr']), icon="📅", accent=AMBER),
+        dict(label=f"Months beating {b_name}", value=f"{s['beat']} of {s['months']}",
+             delta=f"average alpha {pct(s['avg_month'])} a month", tone=tone_of(s['beat'] - s['months'] / 2),
+             icon="🏁", accent=CYAN),
+    ])
+    kpi_row([
+        dict(label="Portfolio value", value=inr(en['value']),
+             delta=f"{pct(s['port_total'])} since {st_['date']:%d-%m-%Y}", tone=tone_of(s['port_total']),
+             icon="💼", accent=PORT_COLOR),
+        dict(label="Best month", value=pct(s['best']['Alpha (%)']),
+             delta=f"{s['best']['Month']} · {inr(s['best']['Alpha (₹)'], 0, sign=True)}", tone="good",
+             icon="🚀", accent=GOOD),
+        dict(label="Worst month", value=pct(s['worst']['Alpha (%)']),
+             delta=f"{s['worst']['Month']} · {inr(s['worst']['Alpha (₹)'], 0, sign=True)}", tone="bad",
+             icon="🧯", accent=BAD),
+    ])
+
+    # ---------- line graph ----------
+    custom = np.stack([m['Month'], m['Portfolio (%)'], m['Benchmark (%)'], m['Alpha (₹)']], axis=1)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.55, 0.45],
+                        subplot_titles=(f"Total alpha built up vs {b_name}", "Alpha each month"))
+    xs = pd.concat([pd.Series([st_['date']]), m['To']]).values
+    fig.add_trace(go.Scatter(
+        x=xs, y=np.concatenate([[0.0], m['Total alpha so far (%)'].to_numpy()]), mode='lines',
+        name="Total alpha so far", line=dict(color=AMBER, width=2.6), fill='tozeroy',
+        fillcolor=hex_rgba(AMBER, 0.10), hovertemplate="total %{y:+.2f}%<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=m['To'], y=m['Alpha (%)'], mode='lines+markers', name="Alpha this month",
+        line=dict(color=VIOLET, width=1.6),
+        marker=dict(size=6, color=[_sign_color(v) for v in m['Alpha (%)']]), customdata=custom,
+        hovertemplate="<b>%{customdata[0]}</b> alpha %{y:+.2f}% (₹%{customdata[3]:,.0f})<br>portfolio "
+                      "%{customdata[1]:+.2f}% · " + b_name + " %{customdata[2]:+.2f}%<extra></extra>"),
+        row=2, col=1)
+    for r in (1, 2):
+        fig.add_hline(y=0, line_color=FAINT, line_dash="dot", row=r, col=1)
+        fig.update_yaxes(ticksuffix="%", row=r, col=1)
+    fig.update_annotations(font=dict(size=13, color=MUTED))
+    fig.update_layout(**PLOT_LAYOUT, height=CHART_H + 220, hovermode='x unified', showlegend=False)
+    with panel():
+        _chart(fig, key="alpha_monthly_line")
+    st.caption(f"{desc} vs {b_name}, {st_['date']:%d-%m-%Y} to {en['date']:%d-%m-%Y}. Alpha each month = portfolio "
+               f"return − {b_name} return that month. Total alpha so far = how much more the portfolio has grown "
+               f"than the same money in {b_name} (+20% = worth 1.2× the {b_name} investment).")
+
+    # ---------- every month ----------
+    view = m.copy()
+    view.attrs = {}                                        # keep Streamlit from trying to show them
+    view['From'] = view['From'].dt.strftime('%d-%m-%Y')
+    view['To'] = view['To'].dt.strftime('%d-%m-%Y')
+    view = view.rename(columns={'Benchmark (%)': f'{b_name} (%)'})
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.markdown(f"**📋 Alpha every month** · {len(view):,} months")
+    with c2:
+        st.download_button("⬇️  Download CSV", view.round(4).to_csv(index=False).encode('utf-8-sig'),
+                           file_name=f"monthly_alpha_vs_{b_name.replace(' ', '_').lower()}.csv",
+                           mime="text/csv", width="stretch", key="al_csv")
+    pc = ['Portfolio (%)', f'{b_name} (%)', 'Alpha (%)', 'Total alpha so far (%)']
+    fmt = {c: '{:+.2f}%' for c in pc}
+    fmt.update({'Value at start (₹)': lambda v: inr(v, 0), 'Value at end (₹)': lambda v: inr(v, 0),
+                'Alpha (₹)': lambda v: inr(v, 0, sign=True)})
+    st.dataframe(style_change_cols(view.style.format(fmt), pc + ['Alpha (₹)']), width="stretch",
+                 hide_index=True, height=CHART_H)
 
 
 # =========================================================
