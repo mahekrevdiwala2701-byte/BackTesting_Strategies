@@ -159,7 +159,7 @@ def style_change_cols(styler, cols):
 # ---------------------------------------------------------
 # Loading
 # ---------------------------------------------------------
-@st.cache_data(show_spinner="Loading data from Google Sheets...", ttl=600)
+@st.cache_data(show_spinner="Loading data from Google Sheets...", ttl=3600)   # 1 hour; the sidebar button refreshes sooner
 def load_all_assets():
     """Returns (asset_dfs, fetch_errors)."""
     asset_dfs, fetch_errors = {}, {}

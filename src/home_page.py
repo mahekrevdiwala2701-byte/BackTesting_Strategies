@@ -75,6 +75,39 @@ def _yrs(y):
 
 
 # =========================================================
+# Cached calculations: each one runs once per set of inputs, so clicking around the page
+# (or a second visitor with the same settings) does not redo the heavy maths.
+# =========================================================
+@st.cache_data(show_spinner="Calculating portfolio returns...", max_entries=32)
+def _cached_portfolio_table(asset_dfs, weights, amount, from_date, to_date, years, trading_only):
+    return portfolio_same_date_returns(asset_dfs, weights, amount, from_date, to_date, years, trading_only,
+                                       short_names=ASSET_SHORT)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_same_date(df, from_date, to_date, years, trading_only):
+    return same_date_returns(df, from_date, to_date, years, trading_only)
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _cached_yearly(table, financial):
+    return yearly_summary(table, financial=financial)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _cached_csv(table):
+    return to_csv(table)
+
+
+@st.cache_data(show_spinner="Calculating alpha...", max_entries=64)
+def _cached_alpha(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m, bench):
+    values = calculated_investment_values(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m)
+    if values is None:
+        return None
+    return monthly_alpha(values, benchmark_close(asset_dfs, bench))
+
+
+# =========================================================
 # Page
 # =========================================================
 def render_home_page(asset_dfs, fetch_errors):
@@ -132,8 +165,7 @@ def render_home_page(asset_dfs, fetch_errors):
         note("Choose the portfolio assets and give at least one a weight above 0%.", AMBER, "👈")
         return
 
-    table = portfolio_same_date_returns(asset_dfs, weights, amount, from_date, to_date, years, trading_only,
-                                        short_names=ASSET_SHORT)
+    table = _cached_portfolio_table(asset_dfs, weights, amount, from_date, to_date, years, trading_only)
     w_norm = {a: w / sum(weights.values()) for a, w in weights.items()}
     mix = " · ".join(f"{ASSET_ICONS[a]} {ASSET_SHORT[a]} {w * 100:.0f}%" for a, w in w_norm.items())
 
@@ -184,13 +216,14 @@ def render_home_page(asset_dfs, fetch_errors):
     _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_only)
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def _portfolio_index(asset_dfs, w_norm):
     """Decorative line for the hero: weighted growth of the portfolio over the last ~3 years."""
     series = []
     for a, w in w_norm.items():
         s = asset_dfs[a].set_index('Date')['Close'].iloc[-800:]
         series.append(w * s / s.iloc[0])
-    return pd.concat(series, axis=1).sort_index().ffill().dropna().sum(axis=1).to_numpy()
+    return pd.concat(series, axis=1, sort=True).ffill().dropna().sum(axis=1).to_numpy()
 
 
 def _data_quality_note(table):
@@ -320,24 +353,25 @@ def _line_tab(table, years):
     with c2:
         smooth = st.toggle("Add 30-day average line", value=True, key="yoy_line_smooth")
     xcol = 'Invest Date' if x_choice == "Investment date" else 'Compare Date'
+    xs = table[xcol].dt.strftime('%Y-%m-%d')               # short date text = much smaller page than full timestamps
 
     t = table
-    r = t['Return (%)']
+    r = t['Return (%)'].round(2)                          # 2 decimals is all the chart shows (smaller page)
     custom = np.stack([t['Invest Date'].dt.strftime('%d-%m-%Y'), t['Compare Date'].dt.strftime('%d-%m-%Y'),
-                       t['Invest Value (₹)'], t['Compare Value (₹)']], axis=1)
+                       t['Invest Value (₹)'].round(0), t['Compare Value (₹)'].round(0)], axis=1)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=t[xcol], y=r.clip(lower=0), mode='lines', line=dict(width=0),
+    fig.add_trace(go.Scatter(x=xs, y=r.clip(lower=0), mode='lines', line=dict(width=0),
                              fill='tozeroy', fillcolor=hex_rgba(GOOD, 0.22), hoverinfo='skip', showlegend=False))
-    fig.add_trace(go.Scatter(x=t[xcol], y=r.clip(upper=0), mode='lines', line=dict(width=0),
+    fig.add_trace(go.Scatter(x=xs, y=r.clip(upper=0), mode='lines', line=dict(width=0),
                              fill='tozeroy', fillcolor=hex_rgba(BAD, 0.25), hoverinfo='skip', showlegend=False))
     fig.add_trace(go.Scatter(
-        x=t[xcol], y=r, mode='lines', name=f"Portfolio {_yrs(years)} return",
+        x=xs, y=r, mode='lines', name=f"Portfolio {_yrs(years)} return",
         line=dict(color="#C4B5FD", width=1.6), customdata=custom,
         hovertemplate="Invest %{customdata[0]}: ₹%{customdata[2]:,.0f}<br>"
                       "Value on %{customdata[1]}: ₹%{customdata[3]:,.0f}<br>"
                       "<b>%{y:+.2f}%</b><extra></extra>"))
     if smooth and len(t) > 30:
-        fig.add_trace(go.Scatter(x=t[xcol], y=r.rolling(30, min_periods=10).mean(), mode='lines',
+        fig.add_trace(go.Scatter(x=xs, y=r.rolling(30, min_periods=10).mean().round(2), mode='lines',
                                  name="30-day average", line=dict(color=INK, width=2, dash='dot'),
                                  hovertemplate="avg %{y:+.2f}%<extra></extra>"))
     fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
@@ -395,8 +429,8 @@ def _year_figure(ys, title):
 
 
 def _yearly_tab(table):
-    fy = yearly_summary(table, financial=True)            # April to March
-    cy = yearly_summary(table, financial=False)           # January to December
+    fy = _cached_yearly(table, True)                      # April to March
+    cy = _cached_yearly(table, False)                     # January to December
     c1, c2 = st.columns(2)
     with c1, panel():
         _chart(_year_figure(fy, "Financial year (April to March)"), key="yoy_yearly_fy")
@@ -415,7 +449,7 @@ def _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_
     dates = pd.Index(table['Invest Date'])
     series = {'Portfolio': (table['Return (%)'].reset_index(drop=True), "#C4B5FD")}
     for a in w_norm:
-        t = same_date_returns(asset_dfs[a], from_date, to_date, years, trading_only).set_index('Invest Date')
+        t = _cached_same_date(asset_dfs[a], from_date, to_date, years, trading_only).set_index('Invest Date')
         series[ASSET_SHORT[a]] = (t.loc[t.index.intersection(dates), 'Return (%)'], COLORS[a])
 
     lo = min(s.min() for s, _ in series.values())
@@ -433,13 +467,14 @@ def _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_
                       xaxis=dict(ticksuffix="%"), yaxis=dict(showticklabels=False),
                       legend=dict(orientation='h', yanchor='top', y=-0.12, x=0), margin=dict(l=12, r=12, t=50, b=40))
 
+    xd = table['Invest Date'].dt.strftime('%Y-%m-%d')      # short date text = smaller page
     fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=table['Invest Date'], y=table['Return (%)'], mode='lines', name='Portfolio',
+    fig2.add_trace(go.Scatter(x=xd, y=table['Return (%)'].round(2), mode='lines', name='Portfolio',
                               line=dict(color="#C4B5FD", width=3),
                               hovertemplate="Portfolio: %{y:+.2f}%<extra></extra>"))
     for a in w_norm:
         col = f"{ASSET_SHORT[a]} Return (%)"
-        fig2.add_trace(go.Scatter(x=table['Invest Date'], y=table[col], mode='lines', name=ASSET_SHORT[a],
+        fig2.add_trace(go.Scatter(x=xd, y=table[col].round(2), mode='lines', name=ASSET_SHORT[a],
                                   line=dict(color=COLORS[a], width=1.2), opacity=0.75,
                                   hovertemplate=f"{ASSET_SHORT[a]}: %{{y:+.2f}}%<extra></extra>"))
     fig2.add_hline(y=0, line_color=FAINT, line_dash="dot")
@@ -483,7 +518,7 @@ LOOKBACKS = {**LOOKBACK_OPTIONS, "2 Years": 24, "2.5 Years": 30}
 
 
 def _alpha_portfolio(asset_dfs, w_norm, amount, from_date, to_date):
-    """Strategy dropdown and its conditions. Returns (portfolio value every day, benchmark, description)."""
+    """Strategy dropdown and its conditions. Returns (monthly alpha table, benchmark, description)."""
     avail = [a for a in ASSETS if a in asset_dfs]
     with panel():
         c1, c2 = st.columns([2, 1])
@@ -510,17 +545,12 @@ def _alpha_portfolio(asset_dfs, w_norm, amount, from_date, to_date):
         note(f"Weights, amount and dates come from the sidebar: <b>{mix}</b>, {inr(amount)}, "
              f"<b>{from_date:%d-%m-%Y}</b> to <b>{to_date:%d-%m-%Y}</b>.", BLUE, "👈")
 
-    values = calculated_investment_values(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m)
-    return values, bench, f"{STRATEGIES[mode]}{extra} ({mix})"
+    m = _cached_alpha(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m, bench)
+    return m, bench, f"{STRATEGIES[mode]}{extra} ({mix})"
 
 
 def _alpha_tab(asset_dfs, w_norm, amount, from_date, to_date):
-    values, bench, desc = _alpha_portfolio(asset_dfs, w_norm, amount, from_date, to_date)
-    if values is None:
-        note("Not enough price data for these dates. Pick a longer period in the sidebar.", AMBER, "⚠️")
-        return
-
-    m = monthly_alpha(values, benchmark_close(asset_dfs, bench))
+    m, bench, desc = _alpha_portfolio(asset_dfs, w_norm, amount, from_date, to_date)
     s = alpha_summary(m)
     if not s:
         note("Not enough price data for these dates. Pick a longer period.", AMBER, "⚠️")
@@ -628,6 +658,6 @@ def _data_tab(table, years):
         st.markdown(f"**{len(table):,} rows**, one per investment date: each asset's price on both dates, "
                     f"its own return, and the total portfolio value and return.")
     with c2:
-        st.download_button("⬇️  Download CSV", to_csv(table), type="primary", width="stretch",
+        st.download_button("⬇️  Download CSV", _cached_csv(table), type="primary", width="stretch",
                            file_name=f"portfolio_same_date_{years}y_returns.csv", mime="text/csv",
                            key="yoy_dl_main")
