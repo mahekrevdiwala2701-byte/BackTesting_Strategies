@@ -178,10 +178,15 @@ a {{ color: var(--accent); }}
 .brand-mark {{ width:34px; height:34px; display:grid; place-items:center; border-radius:10px; color:#fff; font-weight:800;
   font-size:17px; background: linear-gradient(135deg, var(--navy), var(--accent)); }}
 .brand-name {{ font-weight:800; font-size:1.02rem; color: var(--text); letter-spacing:-0.02em; }}
-.st-key-topbar [role="radiogroup"] {{ gap: 4px; flex-wrap: wrap; }}
+.st-key-topbar [role="radiogroup"] {{ gap: 4px; flex-wrap: wrap; margin: 0; align-items: center; }}
+/* keep the brand and the page buttons on one centre line */
+.st-key-topbar > [data-testid="stElementContainer"] {{ margin: 0 !important; align-self: center; }}
+.st-key-topbar [data-testid="stMarkdownContainer"] {{ margin: 0 !important; }}
+.st-key-topbar [data-testid="stButtonGroup"] {{ margin: 0; padding: 0; }}
+.st-key-topbar .brand {{ height: 38px; padding: 0 6px 0 4px; }}
 .st-key-topbar button[data-variant="segmented_control"] {{
   background: transparent !important; border: 1px solid transparent !important; border-radius: 11px !important;
-  box-shadow: none !important; padding: 7px 13px !important; min-height: 0; transition: background .15s ease;
+  box-shadow: none !important; padding: 0 14px !important; height: 38px; min-height: 0; transition: background .15s ease;
 }}
 .st-key-topbar button[data-variant="segmented_control"] p {{ color: var(--soft); font-weight: 600; font-size: .9rem; }}
 .st-key-topbar button[data-variant="segmented_control"]:hover {{ background: var(--surface2) !important; }}
