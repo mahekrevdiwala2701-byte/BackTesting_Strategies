@@ -27,7 +27,7 @@ ASSET_SHORT = {'Gold': 'GoldBEES', 'LargeCap': 'Nifty 50', 'MidCap': 'MidCap', '
 ASSET_ICONS = {'Gold': '🥇', 'LargeCap': '🏢', 'MidCap': '🏬', 'SmallCap': '🏪'}
 
 # One vivid colour per asset, used on every chart, card and chip
-COLORS = {'Gold': '#FBBF24', 'LargeCap': '#60A5FA', 'MidCap': '#34D399', 'SmallCap': '#F472B6'}
+COLORS = {'Gold': '#C8901A', 'LargeCap': '#2563EB', 'MidCap': '#7C3AED', 'SmallCap': '#0D9488'}
 
 # Google Sheet Live URLs
 SHEET_URLS = {

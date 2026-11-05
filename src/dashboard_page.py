@@ -1,4 +1,5 @@
-"""📊 Market Dashboard page: live overview of every asset + analysis tabs."""
+"""📊 Market Overview page: snapshot, comparison and one asset on the page; technical analysis and raw data
+behind buttons."""
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -7,7 +8,7 @@ import streamlit as st
 from src.ui import (
     panel,
     PLOT_LAYOUT, VIOLET, CYAN, AMBER, PINK, EMERALD, BLUE, BAD, GOOD, FAINT, SURFACE, TEXT, MUTED,
-    hero, ticker, section, kpi, kpi_row, tone_of, note, chart, hex_rgba, inr, pct,
+    hero, ticker, section, kpi, kpi_row, tone_of, note, chart, hex_rgba, inr, pct, start_value, reveal, action_bar,
     sidebar_nav, sidebar_footer,
 )
 from src.analytics import compute_technical_indicators, calculate_performance_metrics
@@ -51,7 +52,44 @@ def render_dashboard_page(asset_dfs, fetch_errors):
     if tape:
         ticker(tape)
 
-    # ---------------- Snapshot row ----------------
+    # ---------------- The important things, one after another ----------------
+    _snapshot(period_dfs)
+    if not available:
+        note("No data in the selected period. Pick a different period in the sidebar.", AMBER, "⚠️")
+        return
+
+    section("Compare & correlate", "Every asset rebased to 100, returns and correlations", "🔗", VIOLET)
+    _compare_tab(period_dfs, available)
+
+    section("Asset deep-dive", "Price history and daily moves for one asset", "🔍", CYAN)
+    name = st.selectbox("Asset", options=ASSETS, format_func=lambda n: ASSET_LABELS[n], key="deep_asset")
+    _asset_tab(name, asset_dfs, period_dfs, fetch_errors, start_date, end_date)
+
+    # ---------------- Extras behind buttons ----------------
+    section("Data & more", "Download every price, see the raw records, or open the technical analysis", "📥", PINK)
+    on = action_bar(download=dict(label="⬇️  Download all assets (CSV)", data=_all_assets_csv(period_dfs, available),
+                                  file_name=f"market_data_{start_date:%Y%m%d}_{end_date:%Y%m%d}.csv", key="dash_dl_all"),
+                    toggles=[("📈 Technical analysis", "dash_show_ta"), ("📋 Show raw data", "dash_show_data")])
+    if on["dash_show_ta"]:
+        section("Technical analysis", "Moving averages, Bollinger bands, RSI and drawdown", "📈", PINK)
+        _technical_tab(asset_dfs, available, start_ts, end_ts)
+    if on["dash_show_data"]:
+        section("Raw data", "Every record in the selected period for one asset", "📋", CYAN)
+        _data_tab(period_dfs, available)
+
+
+def _all_assets_csv(period_dfs, available):
+    """All assets in the period in one CSV (an Asset column first)."""
+    parts = []
+    for n in available:
+        d = period_dfs[n].copy()
+        d.insert(0, 'Asset', ASSET_SHORT[n])
+        d['Date'] = d['Date'].dt.strftime('%Y-%m-%d')
+        parts.append(d)
+    return pd.concat(parts, ignore_index=True).to_csv(index=False).encode('utf-8-sig')
+
+
+def _snapshot(period_dfs):
     section("Snapshot", "Latest price and change over the selected period", "⚡", VIOLET)
     cols = st.columns(len(ASSETS))
     for col, name in zip(cols, ASSETS):
@@ -64,30 +102,6 @@ def render_dashboard_page(asset_dfs, fetch_errors):
             chg = (last / first - 1) * 100 if first else 0.0
             kpi(ASSET_SHORT[name], inr(last, 2), f"{chg:+.2f}% in period", tone_of(chg),
                 ASSET_ICONS[name], COLORS[name], spark=d['Close'].to_numpy())
-
-    # ---------------- Per-asset tabs ----------------
-    section("Asset deep-dive", "Price history, daily moves and every record for one asset", "🔍", CYAN)
-    for tab, name in zip(st.tabs([ASSET_LABELS[a] for a in ASSETS]), ASSETS):
-        with tab:
-            _asset_tab(name, asset_dfs, period_dfs, fetch_errors, start_date, end_date)
-
-    # ---------------- Analysis ----------------
-    section("Analysis", "Technical indicators, cross-asset comparison and data export", "🧪", PINK)
-    if not available:
-        note("No data in the selected period. Pick a different period in the sidebar.", AMBER, "⚠️")
-        return
-
-    labels = ["📈 Technical analysis", "🔗 Compare & correlate", "📥 Data inspector"]
-    try:                                                # open "Compare & correlate" first
-        t1, t2, t3 = st.tabs(labels, default=labels[1])
-    except TypeError:                                   # older Streamlit without `default`
-        t2, t1, t3 = st.tabs([labels[1], labels[0], labels[2]])
-    with t1:
-        _technical_tab(asset_dfs, available, start_ts, end_ts)
-    with t2:
-        _compare_tab(period_dfs, available)
-    with t3:
-        _data_tab(period_dfs, available)
 
 
 # =========================================================
@@ -140,7 +154,8 @@ def _asset_tab(name, asset_dfs, period_dfs, fetch_errors, start_date, end_date):
     with panel():
         chart(fig, key=f"price_{name}")
 
-    st.markdown(f"**📋 All records** · {first['Date']:%d %b %Y} to {latest['Date']:%d %b %Y} · {len(d):,} rows")
+    if not reveal(f"📋 Show every {ASSET_SHORT[name]} record ({len(d):,} rows)", key=f"deep_tbl_{name}"):
+        return
     cols = [c for c in ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Change (₹)', 'Change (%)'] if c in d.columns]
     table = d[cols].sort_values('Date', ascending=False).reset_index(drop=True)
     fmt = {'Date': lambda x: x.strftime('%d-%m-%Y'), 'Change (₹)': lambda v: inr(v, 2, sign=True),
@@ -217,8 +232,9 @@ def _technical_tab(asset_dfs, available, start_ts, end_ts):
 
 
 def _compare_tab(period_dfs, available):
+    start_value("cmp_assets", list(available), available)
     picked = st.pills("Assets to compare (click to switch on / off)", options=available, selection_mode="multi",
-                      default=available, format_func=lambda n: f"{ASSET_ICONS[n]} {ASSET_SHORT[n]}",
+                      format_func=lambda n: f"{ASSET_ICONS[n]} {ASSET_SHORT[n]}",
                       key="cmp_assets")
     available = [n for n in available if n in (picked or [])]
     if not available:

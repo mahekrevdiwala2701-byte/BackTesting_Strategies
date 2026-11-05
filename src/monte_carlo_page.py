@@ -22,7 +22,7 @@ from src.ui import (
     PLOT_LAYOUT, STRAT_COLORS, GOOD, BAD, TEXT, INK, MUTED, FAINT,
     VIOLET, CYAN, EMERALD, AMBER, BLUE, PINK, ORANGE,
     hero, section, kpi_row, note, explain, steps, story, waffle, glossary, chart, hex_rgba, inr_short,
-    weight_badge, sidebar_nav, sidebar_footer, sidebar_label,
+    weight_badge, sidebar_nav, sidebar_footer, sidebar_label, action_bar,
 )
 from src.asset_data import ASSETS, ASSET_SHORT, ASSET_ICONS, COLORS
 from src.strategies import STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS
@@ -110,7 +110,7 @@ def _out_of_100(final):
     edges = [(-np.inf, 1), (1, 2), (2, 3), (3, 5), (5, np.inf)]
     labels = ["Ended with LESS than you put in", "Grew, but less than double (1–2×)", "Doubled to tripled (2–3×)",
               "Tripled to 5× (3–5×)", "More than 5×"]
-    colors = [BAD, AMBER, BLUE, VIOLET, EMERALD]
+    colors = [BAD, ORANGE, BLUE, VIOLET, EMERALD]
     m = np.asarray(final) / AMOUNT
     shares = np.array([((m >= lo) & (m < hi)).mean() * 100 for lo, hi in edges])
     counts = np.floor(shares).astype(int)
@@ -145,21 +145,6 @@ def render_monte_carlo_page(asset_dfs, fetch_errors):
     if len(rets) < 24:
         note(f"Only {len(rets)} months where all assets have data. At least 2 years are needed.", BAD, "⛔")
         st.stop()
-
-    # ---------------- 1. How it works ----------------
-    section("How it works", "No crystal ball: just real history, reshuffled", "💡", AMBER)
-    steps([
-        ("📚", "Take real history", f"{len(rets)} real months of all {len(used)} assets "
-         f"({rets.index[0]:%b %Y} – {rets.index[-1]:%b %Y}), moving together exactly as they did.", BLUE),
-        ("🔀", "Shuffle into new futures", f"Pick random {BLOCK}-month chunks and glue them into a new {YEARS}-year "
-         f"path. Repeat {N_SIMS:,} times.", VIOLET),
-        ("⚖️", "Apply your strategy", "Run your weights and strategy on every one of those futures.", PINK),
-        ("📊", "Count the outcomes", "Line up all the endings: the typical one, the bad and great cases, "
-         "and the odds of losing money.", EMERALD),
-    ])
-    if dropped:
-        note("Skipped months with a move above ±60% (looks like a data error in the sheet): "
-             + ", ".join(d.strftime('%b %Y') for d in dropped), AMBER, "⚠️")
 
     # ---------------- 2. Strategy ----------------
     section("Pick a strategy", "How the money is managed during the 10 years", "🧭", VIOLET)
@@ -202,6 +187,7 @@ def render_monte_carlo_page(asset_dfs, fetch_errors):
     with st.spinner(f"Simulating {N_SIMS:,} futures for your mix…"):
         path, s = _simulate_mix(rets, weights, mode, every, lookback)
 
+    # ---------------- Tabs: only the open tab is built ----------------
     # ---------------- 4. The answer ----------------
     section("The answer, in plain words", f"Your mix {mix_label} ({' / '.join(ASSET_SHORT[n] for n in used)})"
             f"{setting_label}", "🗣️", ORANGE)
@@ -214,7 +200,7 @@ def render_monte_carlo_page(asset_dfs, fetch_errors):
          ("🤩 Great case · 1 in 20", _inr(s['p95']), f"{_mult(s['p95'])} your money"),
          ("🎲 Chance of losing money", f"{loss_n:.0f} in 100" if loss_n >= 1 else "Less than 1 in 100",
           f"Typical worst fall on the way: {s['dd_median']:.0f}%")],
-        c1={"bh": "#0E7490", "periodic": "#6D28D9", "diff": "#C2410C"}[mode], c2="#DB2777" if mode == "diff" else "#2563EB")
+        c1=STRAT_COLORS[mode], c2=STRAT_COLORS[mode])
 
     # ---------------- 5. 100 futures ----------------
     section("100 possible futures", "Each dot is one future. Where would your ₹1 lakh end up?", "🔮", BLUE)
@@ -224,22 +210,41 @@ def render_monte_carlo_page(asset_dfs, fetch_errors):
     section("See it in charts", "Each chart says how to read it underneath", "📈", CYAN)
     _outcome_tabs(path, s, color, key="mine")
 
-    # ---------------- 7. Explore every mix ----------------
-    section("Explore every other mix", "Every weight split in 10% steps, simulated on the same futures", "🧪", EMERALD)
-    with st.spinner("Simulating every weight combination (a few seconds the first time, then saved)…"):
-        bh = _simulate_combos(rets, 'bh')
-        if mode == 'bh':
-            _combos_explorer('bh', *bh, bh_ref=None, mine=(s, mix_label))
-        elif mode == 'periodic':
-            pr = _simulate_combos(rets, 'periodic')
-            _combos_explorer('periodic', *pr, bh_ref=bh[0]['All settings'], mine=(s, mix_label))
-        else:
-            pooled, paths, combos, sets = _simulate_diff_all(rets)
-            _diff_explorer(pooled, paths, combos, sets, bh[0]['All settings'], mine=(s, mix_label))
+    # ---------------- Extras behind buttons ----------------
+    section("More", "Compare every other weight split, or read how the simulation works", "🧪", EMERALD)
+    on = action_bar(toggles=[("🧪 Explore every other mix", "mc_show_mix"), ("💡 How it works & glossary", "mc_show_how")])
+    if on["mc_show_mix"]:
+        # ---------------- 7. Explore every mix ----------------
+        section("Explore every other mix", "Every weight split in 10% steps, simulated on the same futures", "🧪", EMERALD)
+        with st.spinner("Simulating every weight combination (a few seconds the first time, then saved)…"):
+            bh = _simulate_combos(rets, 'bh')
+            if mode == 'bh':
+                _combos_explorer('bh', *bh, bh_ref=None, mine=(s, mix_label))
+            elif mode == 'periodic':
+                pr = _simulate_combos(rets, 'periodic')
+                _combos_explorer('periodic', *pr, bh_ref=bh[0]['All settings'], mine=(s, mix_label))
+            else:
+                pooled, paths, combos, sets = _simulate_diff_all(rets)
+                _diff_explorer(pooled, paths, combos, sets, bh[0]['All settings'], mine=(s, mix_label))
+    if on["mc_show_how"]:
+        # ---------------- 1. How it works ----------------
+        section("How it works", "No crystal ball: just real history, reshuffled", "💡", AMBER)
+        steps([
+            ("📚", "Take real history", f"{len(rets)} real months of all {len(used)} assets "
+             f"({rets.index[0]:%b %Y} – {rets.index[-1]:%b %Y}), moving together exactly as they did.", BLUE),
+            ("🔀", "Shuffle into new futures", f"Pick random {BLOCK}-month chunks and glue them into a new {YEARS}-year "
+             f"path. Repeat {N_SIMS:,} times.", VIOLET),
+            ("⚖️", "Apply your strategy", "Run your weights and strategy on every one of those futures.", PINK),
+            ("📊", "Count the outcomes", "Line up all the endings: the typical one, the bad and great cases, "
+             "and the odds of losing money.", EMERALD),
+        ])
+        if dropped:
+            note("Skipped months with a move above ±60% (looks like a data error in the sheet): "
+                 + ", ".join(d.strftime('%b %Y') for d in dropped), AMBER, "⚠️")
 
-    # ---------------- 8. Glossary ----------------
-    section("What the words mean", "Plain-language glossary", "📖", MUTED)
-    glossary(GLOSSARY)
+        # ---------------- 8. Glossary ----------------
+        section("What the words mean", "Plain-language glossary", "📖", MUTED)
+        glossary(GLOSSARY)
 
 
 # =========================================================
@@ -328,8 +333,8 @@ def _combos_explorer(mode, pooled, paths, combos, combo_list, bh_ref, mine):
                              axis=1)
         fig = go.Figure(go.Scatter(
             x=combos['Bottom 5% (₹)'], y=combos['Median (₹)'], mode='markers', name='Every mix',
-            marker=dict(color=combos['Chance of loss (%)'], colorscale=[[0, EMERALD], [0.5, AMBER], [1, BAD]],
-                        size=9, opacity=0.85, line=dict(color='#0A0F1E', width=1),
+            marker=dict(color=combos['Chance of loss (%)'], colorscale=[[0, EMERALD], [0.5, ORANGE], [1, BAD]],
+                        size=9, opacity=0.85, line=dict(color='#FFFFFF', width=1),
                         colorbar=dict(title="Chance<br>of loss", ticksuffix="%", thickness=12)),
             customdata=np.stack([hover, combos['Chance of loss (%)'], combos['Top 5% (₹)']], axis=1),
             hovertemplate=("%{customdata[0]}<br>Typical: ₹%{y:,.0f}<br>Bad case: ₹%{x:,.0f}"
@@ -341,7 +346,7 @@ def _combos_explorer(mode, pooled, paths, combos, combo_list, bh_ref, mine):
                                  textfont=dict(color=PINK, size=13), hoverinfo='skip'))
         for row, txt in ((best_med, "Best typical"), (best_p5, "Safest")):
             fig.add_trace(go.Scatter(x=[row['Bottom 5% (₹)']], y=[row['Median (₹)']], mode='markers+text',
-                                     marker=dict(color=AMBER, size=16, symbol='star', line=dict(color='#0A0F1E', width=1)),
+                                     marker=dict(color=INK, size=16, symbol='star', line=dict(color='#FFFFFF', width=1)),
                                      text=[f"{txt}: {label(row)}  "], textposition='middle left',
                                      textfont=dict(color=INK, size=11), hoverinfo='skip', showlegend=False))
         fig.add_vline(x=AMOUNT, line_dash='dot', line_color=FAINT, annotation_text="Bad case = money back",
@@ -440,9 +445,9 @@ def _diff_explorer(pooled, paths, combos, sets, bh, mine):
                                                                                                   columns=names)
         fig = go.Figure(go.Heatmap(
             z=piv.to_numpy(), x=[n.replace(' · ', '<br>') for n in names], y=order,
-            colorscale=[[0, '#1E1B4B'], [0.35, '#7C3AED'], [0.7, '#EC4899'], [1, '#FBBF24']], xgap=3, ygap=3,
+            colorscale=[[0, '#EEF2FF'], [0.4, '#C7D2FE'], [0.75, '#818CF8'], [1, '#3730A3']], xgap=3, ygap=3,
             text=[[_inr(v) for v in row] for row in piv.to_numpy()], texttemplate="%{text}",
-            textfont=dict(size=11, color='#fff'), customdata=np.dstack([p5.to_numpy(), loss.to_numpy()]),
+            textfont=dict(size=11), customdata=np.dstack([p5.to_numpy(), loss.to_numpy()]),
             colorbar=dict(title="Typical", tickprefix="₹", tickformat=',.0f', thickness=12),
             hovertemplate=("Weights %{y}<br>%{x}<br>Typical: ₹%{z:,.0f}<br>Bad case: ₹%{customdata[0]:,.0f}"
                            "<br>Chance of loss: %{customdata[1]:.1f}%<extra></extra>")))
@@ -495,7 +500,7 @@ def _settings_compared(mode, variants, bh, bh_label):
                                  line=dict(color=col, width=18), showlegend=False, hoverinfo='skip'))
         fig.add_trace(go.Scatter(
             x=[s['median']], y=[lbl], mode='markers', showlegend=False,
-            marker=dict(color='#fff', size=13, line=dict(color='#0A0F1E', width=2.5)),
+            marker=dict(color=INK, size=13, line=dict(color='#FFFFFF', width=2.5)),
             hovertemplate=(f"<b>{lbl}</b><br>Bad case: {_inr(s['p5'])}<br>Middle half: {_inr(p25)} – {_inr(p75)}"
                            f"<br>Typical: {_inr(s['median'])}<br>Average: {_inr(s['mean'])}"
                            f"<br>Great case: {_inr(s['p95'])}<br>Chance of loss: {s['prob_loss']:.1f}%<extra></extra>")))
@@ -569,7 +574,7 @@ def _bell_chart(data, ref, fmt, x_title, color, title, height=480):
                            line=dict(color=col, width=2, dash=dash)))
         notes.append(dict(x=x, y=1.0 + level * 0.11, yref='paper', yanchor='bottom',
                           text=f"<b>{label}</b> {fmt(x)}", showarrow=False, font=dict(color=TEXT, size=11),
-                          bgcolor='#182240', bordercolor=col, borderwidth=1.5, borderpad=4))
+                          bgcolor='#FFFFFF', bordercolor=col, borderwidth=1.5, borderpad=4))
     x_fmt = {'tickprefix': '₹', 'tickformat': ',.0f'} if '₹' in x_title else {'ticksuffix': '%'}
     fig.update_layout(**PLOT_LAYOUT, height=height, bargap=0, hovermode='closest', shapes=shapes, annotations=notes,
                       title=dict(text=title, y=0.98),

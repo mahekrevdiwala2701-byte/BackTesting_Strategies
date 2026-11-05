@@ -1,10 +1,14 @@
-"""Design system for the whole app.
+"""Design system for the whole app: light, navy + indigo.
+
+Soft light-grey page, white cards with gentle shadows, a deep navy → indigo banner at the top of every page,
+indigo for buttons and selected items, teal as the second colour, green / red only for gains / losses.
+Charts: one clear colour per asset, the portfolio as the navy line.
 
 Everything visual lives here so every page looks the same:
-  * colour tokens (dark canvas, one vivid colour per asset / strategy)
-  * the global CSS, including all animations and transitions
-  * HTML building blocks: hero, section headers, KPI cards (with sparklines), chips, ticker tape,
-    step flow, story card, 100-dot outcome grid, glossary, panels
+  * colour tokens and the global CSS
+  * HTML building blocks: top bar + page switcher, page banner, section headers, KPI cards (with sparklines),
+    chips, ticker tape, step flow, story card, 100-dot outcome grid, glossary, panels
+  * reveal() / action_bar(): Download CSV buttons and switches that show extra detail only when asked
   * one Plotly chart theme + a `chart()` helper that applies it
   * Indian number formatting (₹1,00,000 / ₹3.45 L / ₹1.20 Cr)
 """
@@ -18,51 +22,56 @@ import streamlit as st
 # =========================================================
 # Colour tokens
 # =========================================================
-BG = "#0A0F1E"          # page background
-SURFACE = "#121A2E"     # cards / panels
-SURFACE_2 = "#182240"   # raised elements, hover, tooltips
-BORDER = "#232D4A"      # hairlines
-TEXT = "#E6EAF5"        # main text
-INK = "#FFFFFF"         # strong lines on charts (median etc.)
-MUTED = "#8A94B3"       # secondary text
-FAINT = "#5B6584"       # reference lines
+BG = "#F3F5FA"          # page: soft light grey-blue
+SURFACE = "#FFFFFF"     # cards and panels
+SURFACE_2 = "#F1F4F9"   # inputs, hover, tracks
+BORDER = "#E2E7F0"      # hairlines
+TEXT = "#0F1B3D"        # main text: deep navy
+INK = "#0F1B3D"         # strong lines on charts (median, typical case ...)
+MUTED = "#64708A"       # secondary text
+FAINT = "#A3AEC2"       # reference lines
+SOFT = "#3A4766"        # body text on cards
 
-NIGHT = "#0D1328"       # ticker tape
-VIOLET = "#8B5CF6"
-INDIGO = "#6366F1"
-BLUE = "#3B82F6"
-CYAN = "#22D3EE"
-TEAL = "#14B8A6"
-EMERALD = "#10B981"
-AMBER = "#F59E0B"
-ORANGE = "#FB923C"
-PINK = "#EC4899"
-ROSE = "#F43F5E"
+NAVY = "#0B1B3F"        # banner
+NAVY_2 = "#3730A3"      # banner, other end
+NIGHT = "#FFFFFF"       # ticker tape
+ACCENT = "#4F46E5"      # indigo: buttons, selected page / tab, links
+ACCENT_DARK = "#4338CA"
+ACCENT_SOFT = "#EEF0FF"
+PORTFOLIO = "#0F1B3D"   # the total portfolio is the navy line on every chart
 
-GOOD = "#22C55E"        # gains
-BAD = "#F43F5E"         # losses
-GOOD_TEXT = "#4ADE80"
-BAD_TEXT = "#FB7185"
+VIOLET = "#7C3AED"
+INDIGO = "#4F46E5"
+BLUE = "#2563EB"
+CYAN = "#0891B2"
+TEAL = "#0D9488"
+EMERALD = "#059669"
+ORANGE = "#EA580C"
+AMBER = "#EA7A12"       # (name kept for older code: warm orange)
+PINK = "#DB2777"
+ROSE = "#E11D48"
+LIME = "#65A30D"
 
-# Hero gradients: every page has its own colour identity
-GRADIENTS = {
-    "home": ("#4338CA", "#7C3AED", "#DB2777"),
-    "dashboard": ("#6D28D9", "#2563EB", "#0891B2"),
-    "invest": ("#047857", "#0D9488", "#2563EB"),
-    "montecarlo": ("#C2410C", "#DB2777", "#7C3AED"),
-    "portfolio": ("#1D4ED8", "#0891B2", "#059669"),
-}
+GOOD = "#16A34A"        # gains
+BAD = "#DC2626"         # losses
+GOOD_TEXT = "#15803D"
+BAD_TEXT = "#B91C1C"
+GOOD_BG = "#E8F7EE"
+BAD_BG = "#FDECEC"
+
+# Banner colours (the same on every page, so the app feels like one product)
+GRADIENTS = {k: (NAVY, NAVY_2) for k in ("home", "dashboard", "invest", "montecarlo", "portfolio")}
 
 # One colour per strategy (same on the Investment and Monte Carlo pages)
-STRAT_COLORS = {"bh": CYAN, "periodic": "#A78BFA", "diff": ORANGE}
+STRAT_COLORS = {"bh": CYAN, "periodic": VIOLET, "diff": ORANGE}
 
-# Navigation: key -> (icon, label, accent colour)
+# Navigation: key -> (icon, label, colour)
 PAGES = {
-    "home": ("🏠", "Main Dashboard", INDIGO),
-    "dashboard": ("📊", "Market Overview", VIOLET),
-    "invest": ("💰", "Calculated Investment", EMERALD),
-    "montecarlo": ("🎲", "Monte Carlo Simulation", ORANGE),
-    "portfolio": ("💼", "Everyday Portfolio", CYAN),
+    "home": ("🏠", "Main Dashboard", ACCENT),
+    "dashboard": ("📊", "Market Overview", ACCENT),
+    "invest": ("💰", "Calculated Investment", ACCENT),
+    "montecarlo": ("🎲", "Monte Carlo", ACCENT),
+    "portfolio": ("💼", "Everyday Portfolio", ACCENT),
 }
 
 
@@ -129,375 +138,264 @@ def hex_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
+
+
+
 # =========================================================
-# Global CSS
+# Global CSS (light, navy + indigo)
 # =========================================================
 _CSS = f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
 
 :root {{
   --bg:{BG}; --surface:{SURFACE}; --surface2:{SURFACE_2}; --border:{BORDER};
-  --text:{TEXT}; --muted:{MUTED}; --faint:{FAINT}; --night:{NIGHT};
-  --good:{GOOD}; --bad:{BAD}; --good-t:{GOOD_TEXT}; --bad-t:{BAD_TEXT};
-  --display: 'Bricolage Grotesque', 'Plus Jakarta Sans', system-ui, sans-serif;
-  --ease: cubic-bezier(.2,.75,.25,1);
+  --text:{TEXT}; --muted:{MUTED}; --faint:{FAINT}; --soft:{SOFT};
+  --navy:{NAVY}; --navy2:{NAVY_2}; --accent:{ACCENT}; --accent-d:{ACCENT_DARK}; --accent-s:{ACCENT_SOFT};
+  --teal:{TEAL};
+  --good:{GOOD}; --bad:{BAD}; --good-t:{GOOD_TEXT}; --bad-t:{BAD_TEXT}; --good-bg:{GOOD_BG}; --bad-bg:{BAD_BG};
+  --shadow: 0 1px 2px rgba(15,27,61,0.05), 0 6px 18px rgba(15,27,61,0.06);
+  --shadow-lg: 0 2px 4px rgba(15,27,61,0.05), 0 14px 34px rgba(15,27,61,0.10);
+  --font: 'Manrope', system-ui, -apple-system, 'Segoe UI', sans-serif;
 }}
 
-html, body, [class*="css"], .stApp, button, input, textarea, select {{
-  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
-}}
+html, body, [class*="css"], .stApp, button, input, textarea, select {{ font-family: var(--font); }}
+@keyframes marquee {{ from {{ transform: translateX(0); }} to {{ transform: translateX(-50%); }} }}
+@keyframes drawLine {{ from {{ stroke-dashoffset: 1600; }} to {{ stroke-dashoffset: 0; }} }}
 
-/* ================= animations ================= */
-@keyframes fadeUp   {{ from {{ opacity:0; transform: translateY(16px); }} to {{ opacity:1; transform:none; }} }}
-@keyframes fadeIn   {{ from {{ opacity:0; }} to {{ opacity:1; }} }}
-@keyframes slideIn  {{ from {{ opacity:0; transform: translateX(-14px); }} to {{ opacity:1; transform:none; }} }}
-@keyframes popIn    {{ 0% {{ opacity:0; transform: scale(.3); }} 70% {{ transform: scale(1.12); }} 100% {{ opacity:1; transform: scale(1); }} }}
-@keyframes gradientShift {{ 0% {{ background-position: 0% 50%; }} 50% {{ background-position: 100% 50%; }} 100% {{ background-position: 0% 50%; }} }}
-@keyframes floaty   {{ 0%,100% {{ transform: translate(0,0) scale(1); }} 50% {{ transform: translate(-18px,14px) scale(1.06); }} }}
-@keyframes draw     {{ from {{ stroke-dashoffset: 1400; }} to {{ stroke-dashoffset: 0; }} }}
-@keyframes marquee  {{ from {{ transform: translateX(0); }} to {{ transform: translateX(-50%); }} }}
-@keyframes shine    {{ from {{ left: -60%; }} to {{ left: 130%; }} }}
-@keyframes growBar  {{ from {{ transform: scaleX(0); }} to {{ transform: scaleX(1); }} }}
-@keyframes glow     {{ 0%,100% {{ opacity:.55; }} 50% {{ opacity:1; }} }}
-
-/* ---------- canvas: soft colour glows on near-black ---------- */
-.stApp {{
-  background:
-    radial-gradient(900px 500px at 8% -10%, rgba(139,92,246,0.18), transparent 60%),
-    radial-gradient(800px 480px at 100% 0%, rgba(34,211,238,0.11), transparent 60%),
-    radial-gradient(700px 500px at 50% 110%, rgba(236,72,153,0.08), transparent 60%),
-    var(--bg);
-  background-attachment: fixed;
-}}
+/* ---------- canvas ---------- */
+.stApp {{ background: var(--bg); color: var(--text); }}
 header[data-testid="stHeader"] {{ background: transparent; }}
-.block-container, [data-testid="stMainBlockContainer"] {{
-  padding-top: 2rem; padding-bottom: 4rem; max-width: 1480px;
-}}
-h1, h2, h3, h4, h5 {{ font-family: var(--display); letter-spacing: -0.015em; }}
-[data-testid="stCaptionContainer"] {{ color: var(--muted); }}
+.block-container, [data-testid="stMainBlockContainer"] {{ padding-top: 1.1rem; padding-bottom: 4rem; max-width: 1400px; }}
+h1, h2, h3, h4, h5 {{ font-family: var(--font); color: var(--text); letter-spacing: -0.02em; }}
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {{ color: var(--muted); }}
+a {{ color: var(--accent); }}
+*:focus-visible {{ outline: 2px solid var(--accent) !important; outline-offset: 2px; }}
 
-/* every chart, table and tab panel glides in */
-[data-testid="stPlotlyChart"], [data-testid="stDataFrame"] {{ animation: fadeUp .7s var(--ease) both; }}
-.stTabs [role="tabpanel"], .stTabs [data-baseweb="tab-panel"] {{ animation: fadeIn .45s ease both; }}
-
-/* ---------- sidebar ---------- */
-section[data-testid="stSidebar"] {{
-  background:
-    radial-gradient(380px 280px at 0% 0%, rgba(139,92,246,0.22), transparent 70%),
-    radial-gradient(360px 280px at 100% 100%, rgba(34,211,238,0.10), transparent 70%),
-    linear-gradient(180deg, #10173A 0%, #0B1122 100%);
-  border-right: 1px solid var(--border);
+/* ---------- top bar: brand + page switcher ---------- */
+.st-key-topbar {{ background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow);
+  padding: 8px 10px; margin-bottom: 1.1rem; gap: 14px; }}
+.brand {{ display:flex; align-items:center; gap:10px; white-space:nowrap; padding-left: 4px; }}
+.brand-mark {{ width:34px; height:34px; display:grid; place-items:center; border-radius:10px; color:#fff; font-weight:800;
+  font-size:17px; background: linear-gradient(135deg, var(--navy), var(--accent)); }}
+.brand-name {{ font-weight:800; font-size:1.02rem; color: var(--text); letter-spacing:-0.02em; }}
+.st-key-topbar [role="radiogroup"] {{ gap: 4px; flex-wrap: wrap; }}
+.st-key-topbar button[data-variant="segmented_control"] {{
+  background: transparent !important; border: 1px solid transparent !important; border-radius: 11px !important;
+  box-shadow: none !important; padding: 7px 13px !important; min-height: 0; transition: background .15s ease;
 }}
-section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {{ padding-top: .8rem; }}
+.st-key-topbar button[data-variant="segmented_control"] p {{ color: var(--soft); font-weight: 600; font-size: .9rem; }}
+.st-key-topbar button[data-variant="segmented_control"]:hover {{ background: var(--surface2) !important; }}
+.st-key-topbar button[data-variant="segmented_control"][aria-checked="true"] {{
+  background: var(--accent) !important; box-shadow: 0 4px 12px rgba(79,70,229,0.30) !important;
+}}
+.st-key-topbar button[data-variant="segmented_control"][aria-checked="true"] p {{ color: #fff; font-weight: 700; }}
+
+/* ---------- sidebar: settings ---------- */
+section[data-testid="stSidebar"] {{ background: var(--surface); border-right: 1px solid var(--border); }}
+section[data-testid="stSidebar"]::before {{ content:""; position:absolute; left:0; right:0; top:0; height:4px;
+  background: linear-gradient(90deg, var(--navy), var(--accent), var(--teal)); }}
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {{ padding-top: .4rem; }}
 section[data-testid="stSidebar"] hr {{ margin: 14px 0; border-color: var(--border); }}
-.brand {{
-  display:flex; align-items:center; gap:12px; padding: 6px 4px 18px 4px;
-  border-bottom: 1px solid var(--border); margin-bottom: 12px; animation: fadeIn .6s ease both;
-}}
-.brand-logo {{
-  width:44px; height:44px; border-radius:14px; display:grid; place-items:center; font-size:22px;
-  background: linear-gradient(135deg, #8B5CF6, #3B82F6 45%, #22D3EE); background-size: 200% 200%;
-  animation: gradientShift 6s ease infinite; box-shadow: 0 10px 26px rgba(99,102,241,0.40);
-}}
-.brand-name {{ font-family: var(--display); font-weight:800; font-size:1.12rem; color:#fff; line-height:1.1; }}
-.brand-sub {{ font-size:0.7rem; color:var(--muted); letter-spacing:0.12em; margin-top:3px; }}
-.side-label {{
-  font-size:0.68rem; font-weight:800; letter-spacing:0.16em; text-transform:uppercase;
-  color:var(--faint); margin: 16px 2px 8px 2px;
-}}
-section[data-testid="stSidebar"] .stButton > button {{
-  justify-content:flex-start; text-align:left; padding: 0.6rem 0.9rem; min-height: 2.7rem;
-  border-radius: 14px; font-weight:600; font-size:0.93rem; position: relative; overflow: hidden;
-  transition: transform .2s var(--ease), background .2s ease, box-shadow .2s ease;
-}}
-section[data-testid="stSidebar"] .stButton > button > div {{ justify-content:flex-start; width:100%; }}
-section[data-testid="stSidebar"] .stButton > button p {{ text-align:left; font-weight:600; }}
-section[data-testid="stSidebar"] .stButton {{ margin-bottom: -6px; }}
-section[data-testid="stSidebar"] .stButton > button[kind="secondary"],
-section[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {{
-  background: transparent; border: 1px solid transparent; color: #C3CAE0;
-}}
-section[data-testid="stSidebar"] .stButton > button[kind="secondary"]:hover,
-section[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"]:hover {{
-  background: rgba(139,92,246,0.12); border-color: rgba(139,92,246,0.32); color:#fff; transform: translateX(4px);
-}}
+.side-title {{ font-size:1.2rem; font-weight:800; color: var(--text); margin: 0 2px 2px 2px; }}
+.side-hint {{ font-size:.82rem; color: var(--muted); margin: 0 2px 6px 2px; }}
+.side-label {{ font-size:0.82rem; font-weight:700; color: var(--text); margin: 18px 2px 8px 2px;
+  padding-top: 12px; border-top: 1px solid var(--border); }}
 
 /* ---------- buttons ---------- */
 .stButton > button[kind="primary"], [data-testid="stBaseButton-primary"],
 [data-testid="stFormSubmitButton"] button, [data-testid="stBaseButton-primaryFormSubmit"] {{
-  background: linear-gradient(135deg, #8B5CF6 0%, #6366F1 50%, #3B82F6 100%) !important; background-size: 200% 200% !important;
-  border: 0 !important; color: #fff !important; font-weight: 700 !important; position: relative; overflow: hidden;
-  box-shadow: 0 8px 22px rgba(99,102,241,0.32);
-  transition: transform .2s var(--ease), box-shadow .2s ease, filter .2s ease;
+  background: linear-gradient(135deg, var(--accent), #6366F1) !important; border: 0 !important; color: #fff !important;
+  font-weight: 700 !important; border-radius: 12px !important; box-shadow: 0 6px 16px rgba(79,70,229,0.28) !important;
+  transition: filter .15s ease;
 }}
-.stButton > button[kind="primary"] p, [data-testid="stFormSubmitButton"] button p {{ color:#fff !important; }}
-.stButton > button[kind="primary"]::after, [data-testid="stFormSubmitButton"] button::after {{
-  content:""; position:absolute; top:0; left:-60%; width:40%; height:100%;
-  background: linear-gradient(110deg, transparent, rgba(255,255,255,0.35), transparent);
+.stButton > button[kind="primary"] p, [data-testid="stFormSubmitButton"] button p {{ color:#fff !important; font-weight:700; }}
+.stButton > button[kind="primary"]:hover, [data-testid="stFormSubmitButton"] button:hover {{ filter: brightness(1.08); }}
+.stButton > button[kind="secondary"], [data-testid="stBaseButton-secondary"] {{
+  background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 12px;
 }}
-.stButton > button[kind="primary"]:hover::after, [data-testid="stFormSubmitButton"] button:hover::after {{
-  animation: shine .8s ease;
-}}
-.stButton > button[kind="primary"]:hover, [data-testid="stFormSubmitButton"] button:hover {{
-  transform: translateY(-2px); box-shadow: 0 14px 30px rgba(99,102,241,0.45); filter: brightness(1.08);
-}}
+.stButton > button[kind="secondary"]:hover {{ border-color: var(--accent); color: var(--accent); }}
 [data-testid="stDownloadButton"] button {{
-  border: 1px solid rgba(34,211,238,0.35); background: rgba(34,211,238,0.08); color: #A5F3FC;
-  font-weight: 600; border-radius: 12px; transition: all .2s var(--ease);
+  border: 1px solid #C7CBFB; background: var(--accent-s); color: var(--accent-d); font-weight: 700; border-radius: 12px;
 }}
-[data-testid="stDownloadButton"] button:hover {{ background: rgba(34,211,238,0.18); color:#fff; transform: translateY(-2px); }}
+[data-testid="stDownloadButton"] button:hover {{ background: #E0E3FF; border-color: var(--accent); }}
 
-/* ---------- tabs as pills ---------- */
+/* ---------- st.tabs: underline ---------- */
 .stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"] {{
-  gap: 6px; background: var(--surface); padding: 6px; border-radius: 16px;
-  border: 1px solid var(--border); overflow-x: auto; width: fit-content; max-width: 100%;
+  gap: 2px; border-bottom: 1px solid var(--border); overflow-x: auto; background: transparent;
 }}
 .stTabs [data-baseweb="tab"], .stTabs [data-testid="stTab"] {{
-  height: auto; padding: 8px 16px; border-radius: 11px; color: var(--muted);
-  font-weight: 600; background: transparent; white-space: nowrap; border: 0; margin: 0;
-  transition: background .25s ease, color .25s ease, transform .2s var(--ease);
+  height: auto; padding: 9px 14px; background: transparent; white-space: nowrap; border: 0;
+  border-bottom: 2px solid transparent; margin: 0 0 -1px 0; border-radius: 0;
 }}
-.stTabs [data-testid="stTab"] p {{ font-weight: 600; font-size: 0.92rem; }}
-.stTabs [data-baseweb="tab"]:hover, .stTabs [data-testid="stTab"]:hover {{
-  color: var(--text); background: rgba(255,255,255,0.05); transform: translateY(-1px);
-}}
-.stTabs [role="tab"][aria-selected="true"] {{
-  background: linear-gradient(135deg, #8B5CF6, #3B82F6) !important;
-  color: #fff !important; box-shadow: 0 6px 18px rgba(99,102,241,0.32);
-}}
-.stTabs [role="tab"][aria-selected="true"] p {{ color: #fff !important; }}
+.stTabs [data-testid="stTab"] p {{ font-weight: 600; font-size: 0.92rem; color: var(--muted); }}
+.stTabs [role="tab"][aria-selected="true"] {{ border-bottom-color: var(--accent); }}
+.stTabs [role="tab"][aria-selected="true"] p {{ color: var(--accent) !important; font-weight: 700; }}
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"],
 .stTabs .react-aria-SelectionIndicator {{ display: none !important; }}
-.stTabs [data-baseweb="tab-panel"], .stTabs [role="tabpanel"] {{ padding-top: 1.1rem; }}
+.stTabs [data-baseweb="tab-panel"], .stTabs [role="tabpanel"] {{ padding-top: 1rem; }}
 
-/* ---------- panels (st.container(border=True) via panel()) ---------- */
+/* ---------- "show more" switches and action rows ---------- */
+[class*="st-key-reveal_"] {{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 7px 14px 5px 12px; width: fit-content !important; box-shadow: var(--shadow); }}
+[class*="st-key-reveal_"]:hover {{ border-color: #A5B4FC; }}
+[class*="st-key-reveal_"] p {{ font-weight: 700; color: var(--text); }}
+[class*="st-key-actions_"] {{ gap: 10px; flex-wrap: wrap; margin: 4px 0 10px 0; }}
+
+/* ---------- panels, forms, tables ---------- */
 [data-testid="stVerticalBlockBorderWrapper"], [class*="st-key-panel_"] {{
-  background: linear-gradient(180deg, rgba(24,34,64,0.60), rgba(18,26,46,0.60)) !important;
-  border-radius: 20px !important; border-color: var(--border) !important;
-  transition: box-shadow .3s ease, border-color .3s ease; animation: fadeUp .7s var(--ease) both;
+  background: var(--surface) !important; border-radius: 16px !important; border-color: var(--border) !important;
+  box-shadow: var(--shadow);
 }}
-[data-testid="stVerticalBlockBorderWrapper"]:hover, [class*="st-key-panel_"]:hover {{
-  border-color: rgba(139,92,246,0.35) !important; box-shadow: 0 16px 40px rgba(0,0,0,0.35);
-}}
-[data-testid="stForm"] {{
-  background: linear-gradient(180deg, rgba(24,34,64,0.60), rgba(18,26,46,0.60));
-  border: 1px solid var(--border) !important; border-radius: 20px !important; padding: 1.2rem 1.3rem;
-}}
-[data-testid="stDataFrame"], [data-testid="stTable"] {{
-  border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
-}}
-[data-testid="stExpander"] details {{ border-radius: 14px; border-color: var(--border); background: var(--surface); }}
-[data-testid="stAlert"] {{ border-radius: 14px; }}
+[data-testid="stForm"] {{ background: var(--surface); border: 1px solid var(--border) !important; border-radius: 16px !important;
+  padding: 1.1rem 1.2rem; box-shadow: var(--shadow); }}
+[data-testid="stDataFrame"], [data-testid="stTable"] {{ border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+  box-shadow: var(--shadow); }}
+[data-testid="stExpander"] details {{ border-radius: 12px; border-color: var(--border); background: var(--surface); }}
+[data-testid="stAlert"] {{ border-radius: 12px; }}
 
-/* ---------- radio as segmented pills ---------- */
-[data-testid="stRadio"] div[role="radiogroup"] {{ gap: 8px; flex-wrap: wrap; }}
-[data-testid="stRadio"] div[role="radiogroup"] > label,
-[data-testid="stRadio"] [data-testid="stRadioOption"] {{
-  background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
-  padding: 7px 15px 7px 11px; margin: 0; transition: all .2s var(--ease);
+/* ---------- radio + pills ---------- */
+[data-testid="stRadio"] div[role="radiogroup"] {{ gap: 6px; flex-wrap: wrap; }}
+[data-testid="stRadio"] div[role="radiogroup"] > label, [data-testid="stRadio"] [data-testid="stRadioOption"] {{
+  background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 6px 14px 6px 10px; margin: 0;
 }}
-[data-testid="stRadio"] div[role="radiogroup"] > label:hover,
-[data-testid="stRadio"] [data-testid="stRadioOption"]:hover {{ border-color: rgba(139,92,246,0.55); transform: translateY(-1px); }}
+[data-testid="stRadio"] [data-testid="stRadioOption"]:hover {{ border-color: #A5B4FC; }}
 [data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked),
-[data-testid="stRadio"] [data-testid="stRadioOption"][data-selected="true"] {{
-  background: linear-gradient(135deg, rgba(139,92,246,0.22), rgba(59,130,246,0.18));
-  border-color: rgba(139,92,246,0.85); box-shadow: 0 0 0 3px rgba(139,92,246,0.14);
-}}
-[data-testid="stRadio"] [data-testid="stRadioOption"][data-selected="true"] p {{ color: #fff; font-weight: 700; }}
+[data-testid="stRadio"] [data-testid="stRadioOption"][data-selected="true"] {{ background: var(--accent-s); border-color: var(--accent); }}
+[data-testid="stRadio"] [data-testid="stRadioOption"][data-selected="true"] p {{ color: var(--accent-d); font-weight: 700; }}
 section[data-testid="stSidebar"] [data-testid="stRadio"] div[role="radiogroup"] > label,
-section[data-testid="stSidebar"] [data-testid="stRadio"] [data-testid="stRadioOption"] {{ padding: 4px 12px 4px 8px; }}
-
-/* ---------- pills (multi-select toggles) ---------- */
-[data-testid="stButtonGroup"] button {{ transition: all .2s var(--ease); border-radius: 999px !important; }}
-[data-testid="stButtonGroup"] button:hover {{ transform: translateY(-1px); }}
+section[data-testid="stSidebar"] [data-testid="stRadio"] [data-testid="stRadioOption"] {{ padding: 4px 11px 4px 8px; }}
+[data-testid="stButtonGroup"] button {{ border-radius: 999px !important; }}
 
 /* ================= custom components ================= */
 
-/* hero */
-.hero {{
-  position: relative; overflow: hidden; border-radius: 24px; padding: 30px 32px 26px 32px;
-  margin-bottom: 1.3rem; color: #fff; isolation: isolate;
-  background: linear-gradient(120deg, var(--g1), var(--g2), var(--g3), var(--g1));
-  background-size: 260% 260%; animation: gradientShift 16s ease infinite, fadeUp .7s var(--ease) both;
-  box-shadow: 0 18px 50px rgba(0,0,0,0.40), inset 0 1px 0 rgba(255,255,255,0.15);
-}}
-.hero .orb {{ position:absolute; border-radius:50%; z-index:-1; pointer-events:none;
-  background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.30), rgba(255,255,255,0) 70%); }}
-.hero .orb.o1 {{ width:320px; height:320px; right:-80px; top:-140px; animation: floaty 9s ease-in-out infinite; }}
-.hero .orb.o2 {{ width:200px; height:200px; right:260px; bottom:-120px; opacity:.55; animation: floaty 12s ease-in-out infinite reverse; }}
-.hero svg.hero-line {{ position:absolute; right:0; bottom:0; width:46%; height:68%; z-index:-1; opacity:.42; }}
-.hero svg.hero-line path.l {{ stroke-dasharray: 1400; animation: draw 2.6s var(--ease) .2s both; }}
-.hero-eyebrow {{
-  display:inline-flex; align-items:center; gap:8px; font-size:0.72rem; font-weight:800;
-  letter-spacing:0.16em; text-transform:uppercase; color: #fff;
-  background: rgba(255,255,255,0.14); padding: 6px 12px; border-radius: 999px; margin-bottom: 14px;
-  border: 1px solid rgba(255,255,255,0.22);
-}}
-.hero-title {{ font-family: var(--display); font-size: 2.45rem; font-weight: 800; line-height: 1.05;
-  letter-spacing:-0.03em; margin:0; }}
-.hero-sub {{ font-size: 1.02rem; color: rgba(255,255,255,0.86); margin-top: 10px; max-width: 780px; line-height:1.55; }}
-.hero-chips {{ display:flex; flex-wrap:wrap; gap:8px; margin-top: 18px; }}
-.hero-chip {{
-  font-size:0.8rem; font-weight:700; padding:7px 13px; border-radius:999px;
-  background: rgba(10,15,30,0.28); border: 1px solid rgba(255,255,255,0.22); color:#fff;
-  backdrop-filter: blur(6px); animation: fadeUp .6s var(--ease) both;
-}}
-.hero-chip:nth-child(2) {{ animation-delay: .08s; }} .hero-chip:nth-child(3) {{ animation-delay: .16s; }}
+/* page banner: deep navy -> indigo */
+.hero {{ position: relative; overflow: hidden; border-radius: 20px; margin: 0 0 1.1rem 0; padding: 26px 28px 20px 28px;
+  background: linear-gradient(120deg, var(--g1) 0%, var(--g2) 100%); isolation: isolate;
+  box-shadow: 0 14px 34px rgba(30,27,94,0.22); }}
+.hero::before {{ content:""; position:absolute; inset:0; z-index:-1;
+  background: radial-gradient(520px 260px at 88% 115%, rgba(13,148,136,0.45), transparent 70%),
+              radial-gradient(420px 240px at 70% -30%, rgba(129,140,248,0.35), transparent 70%); }}
+.hero-top {{ display:flex; align-items:flex-end; gap: 28px; }}
+.hero-text {{ flex: 1 1 auto; min-width: 0; }}
+.hero-eyebrow {{ display:inline-block; font-size: .8rem; font-weight: 700; color: #C7D2FE; margin-bottom: 8px; }}
+.hero-title {{ font-size: clamp(1.9rem, 3.6vw, 2.8rem); font-weight: 800; line-height: 1.06; letter-spacing: -0.035em;
+  margin: 0; color: #fff; }}
+.hero-sub {{ font-size: 1rem; color: rgba(255,255,255,0.82); margin-top: 10px; max-width: 66ch; line-height: 1.55; }}
+.hero svg.hero-line {{ flex: 0 0 32%; height: 100px; }}
+.hero svg.hero-line path.l {{ stroke-dasharray: 1600; animation: drawLine 1.6s ease-out .1s both; }}
+.hero-chips {{ display:flex; flex-wrap:wrap; gap: 8px; margin-top: 16px; }}
+.hero-chip {{ font-size: .82rem; font-weight: 600; color: #fff; padding: 6px 12px; border-radius: 999px;
+  background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.20); }}
 
 /* ticker tape */
-.ticker {{ position:relative; overflow:hidden; border-radius:14px; margin: 0 0 1.3rem 0;
-  background: var(--night); border: 1px solid var(--border); animation: fadeIn .6s ease both; }}
-.ticker::before, .ticker::after {{ content:""; position:absolute; top:0; bottom:0; width:60px; z-index:2; }}
-.ticker::before {{ left:0; background: linear-gradient(90deg, var(--night), transparent); }}
-.ticker::after {{ right:0; background: linear-gradient(-90deg, var(--night), transparent); }}
-.ticker-track {{ display:flex; width:max-content; animation: marquee 32s linear infinite; }}
+.ticker {{ position:relative; overflow:hidden; margin: 0 0 1.1rem 0; border-radius: 14px; background: var(--surface);
+  border: 1px solid var(--border); box-shadow: var(--shadow); }}
+.ticker::before, .ticker::after {{ content:""; position:absolute; top:0; bottom:0; width:40px; z-index:2; }}
+.ticker::before {{ left:0; background: linear-gradient(90deg, var(--surface), transparent); }}
+.ticker::after {{ right:0; background: linear-gradient(-90deg, var(--surface), transparent); }}
+.ticker-track {{ display:flex; width:max-content; animation: marquee 45s linear infinite; }}
 .ticker:hover .ticker-track {{ animation-play-state: paused; }}
-.tk {{ display:flex; align-items:center; gap:10px; padding: 11px 26px; color:#C9CFE6; font-weight:600;
-  font-size:0.9rem; white-space:nowrap; border-right: 1px solid rgba(255,255,255,0.06); }}
-.tk-dot {{ width:9px; height:9px; border-radius:50%; animation: glow 2s ease-in-out infinite; }}
-.tk-name {{ color:#fff; font-weight:800; letter-spacing:.02em; }}
-.tk-up {{ color:{GOOD_TEXT}; font-weight:800; }} .tk-down {{ color:{BAD_TEXT}; font-weight:800; }}
+.tk {{ display:flex; align-items:center; gap:9px; padding: 10px 24px; color: var(--soft); font-size:0.9rem; white-space:nowrap;
+  border-right: 1px solid var(--border); font-variant-numeric: tabular-nums; }}
+.tk-dot {{ width:9px; height:9px; border-radius:50%; }}
+.tk-name {{ color: var(--text); font-weight:700; }}
+.tk-up {{ color:{GOOD_TEXT}; font-weight:700; }} .tk-down {{ color:{BAD_TEXT}; font-weight:700; }}
 
 /* section header */
-.sec {{ display:flex; align-items:center; gap:13px; margin: 2rem 0 0.95rem 0; animation: slideIn .6s var(--ease) both; }}
-.sec-icon {{
-  width:40px; height:40px; flex: 0 0 40px; border-radius:12px; display:grid; place-items:center; font-size:19px;
-  background: color-mix(in srgb, var(--c) 18%, transparent);
-  border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
-  box-shadow: 0 0 18px color-mix(in srgb, var(--c) 25%, transparent);
-  transition: transform .3s var(--ease);
-}}
-.sec:hover .sec-icon {{ transform: rotate(-8deg) scale(1.08); }}
-.sec-title {{ font-family: var(--display); font-size:1.32rem; font-weight:800; color:var(--text); line-height:1.15; letter-spacing:-0.02em; }}
-.sec-sub {{ font-size:0.86rem; color:var(--muted); margin-top:3px; }}
-.sec-bar {{ flex:1; height:2px; margin-left:10px; border-radius: 2px; transform-origin: left;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--c) 65%, transparent), transparent);
-  animation: growBar 1s var(--ease) .15s both; }}
+.sec {{ display:flex; align-items:center; gap:12px; margin: 1.8rem 0 0.9rem 0; }}
+.sec-icon {{ width:36px; height:36px; flex: 0 0 36px; border-radius:11px; display:grid; place-items:center; font-size:17px;
+  background: color-mix(in srgb, var(--c) 12%, white); border: 1px solid color-mix(in srgb, var(--c) 25%, white); }}
+.sec-title {{ font-size: 1.18rem; font-weight: 800; color: var(--text); line-height: 1.2; letter-spacing: -0.02em; }}
+.sec-sub {{ font-size: .86rem; color: var(--muted); margin-top: 2px; }}
+.sec-bar {{ flex:1; height:2px; margin-left:12px; border-radius:2px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--c) 45%, white), transparent); }}
 
 /* KPI card */
-.kpi {{
-  position:relative; overflow:hidden; border-radius:18px; padding:16px 18px 15px 18px;
-  min-height: 126px; height:100%;
-  background:
-    radial-gradient(170px 110px at 100% 0%, color-mix(in srgb, var(--a) 22%, transparent), transparent 70%),
-    linear-gradient(160deg, color-mix(in srgb, var(--a) 12%, {SURFACE}) 0%, {SURFACE} 62%);
-  border: 1px solid color-mix(in srgb, var(--a) 28%, {BORDER});
-  transition: transform .3s var(--ease), box-shadow .3s ease, border-color .3s ease;
-  animation: fadeUp .65s var(--ease) both; margin-bottom: 4px;
-}}
-.kpi::before {{
-  content:""; position:absolute; left:0; top:0; right:0; height:3px;
-  background: linear-gradient(90deg, var(--a), color-mix(in srgb, var(--a) 15%, transparent));
-}}
-[data-testid="stColumn"]:nth-child(2) .kpi {{ animation-delay: .07s; }}
-[data-testid="stColumn"]:nth-child(3) .kpi {{ animation-delay: .14s; }}
-[data-testid="stColumn"]:nth-child(4) .kpi {{ animation-delay: .21s; }}
-[data-testid="stColumn"]:nth-child(5) .kpi {{ animation-delay: .28s; }}
-.kpi:hover {{
-  transform: translateY(-4px); border-color: color-mix(in srgb, var(--a) 60%, {BORDER});
-  box-shadow: 0 16px 34px color-mix(in srgb, var(--a) 22%, transparent);
-}}
-.kpi-top {{ display:flex; align-items:center; gap:9px; margin-bottom:10px; min-width:0; position:relative; z-index:1; }}
-.kpi-icon {{
-  width:30px; height:30px; flex: 0 0 30px; border-radius:9px; display:grid; place-items:center; font-size:15px;
-  background: color-mix(in srgb, var(--a) 22%, transparent);
-}}
-.kpi-label {{ font-size:0.72rem; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; color:var(--muted);
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }}
-.kpi-value {{
-  font-family: var(--display); font-size:1.7rem; font-weight:800; color:#fff; letter-spacing:-0.03em;
-  line-height:1.1; font-variant-numeric: tabular-nums; word-break: break-word; position:relative; z-index:1;
-}}
-.kpi-delta {{
-  display:inline-flex; align-items:center; gap:5px; margin-top:9px; font-size:0.8rem; font-weight:700;
-  padding:3px 10px; border-radius:999px; font-variant-numeric: tabular-nums; position:relative; z-index:1;
-}}
-.kpi-delta.good {{ color: var(--good-t); background: #10291F; border: 1px solid rgba(34,197,94,0.25); }}
-.kpi-delta.bad {{ color: var(--bad-t); background: #2C1320; border: 1px solid rgba(244,63,94,0.25); }}
-.kpi-delta.neutral {{ color: #AEB8D6; background: #1A2240; border: 1px solid rgba(138,148,179,0.20); font-weight:600; }}
-.kpi-spark {{ position:absolute; right:10px; bottom:8px; width:44%; height:42px; z-index:0; opacity:.9; }}
-.kpi-spark path.l {{ stroke-dasharray: 1400; animation: draw 1.8s var(--ease) .3s both; }}
+.kpi {{ position:relative; overflow:hidden; border-radius:16px; padding:16px 18px 15px 18px; min-height: 126px; height:100%;
+  margin-bottom: 4px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
+  transition: box-shadow .2s ease, transform .2s ease; }}
+.kpi::before {{ content:""; position:absolute; left:0; right:0; top:0; height:4px;
+  background: linear-gradient(90deg, var(--a), color-mix(in srgb, var(--a) 35%, white)); }}
+.kpi:hover {{ box-shadow: var(--shadow-lg); transform: translateY(-2px); }}
+.kpi-top {{ display:flex; align-items:center; gap:9px; margin-bottom:8px; min-width:0; position:relative; z-index:1; }}
+.kpi-icon {{ width:30px; height:30px; flex: 0 0 30px; border-radius:50%; display:grid; place-items:center; font-size:14px;
+  background: color-mix(in srgb, var(--a) 13%, white); }}
+.kpi-label {{ font-size:0.86rem; font-weight:600; color: var(--muted); white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; min-width:0; }}
+.kpi-value {{ font-size: clamp(1.35rem, 1.7vw, 2rem); font-weight: 800; color: var(--text); letter-spacing: -0.02em;
+  line-height: 1.1; font-variant-numeric: tabular-nums; white-space: nowrap; position:relative; z-index:1; }}
+.kpi-delta {{ display:inline-flex; align-items:center; gap:4px; margin-top:9px; font-size:0.8rem; font-weight:700;
+  padding: 3px 9px; border-radius: 999px; font-variant-numeric: tabular-nums; position:relative; z-index:1; }}
+.kpi-delta.good {{ color: var(--good-t); background: var(--good-bg); }}
+.kpi-delta.bad {{ color: var(--bad-t); background: var(--bad-bg); }}
+.kpi-delta.neutral {{ color: var(--soft); background: var(--surface2); font-weight: 600; }}
+.kpi-spark {{ position:absolute; right:12px; bottom:10px; width:40%; height:40px; z-index:0; opacity:.9; }}
 
 /* chips, notes, explain */
-.chip {{
-  display:inline-flex; align-items:center; gap:7px; font-size:0.8rem; font-weight:600; color:var(--text);
-  padding:5px 11px; border-radius:999px; margin: 0 6px 6px 0;
-  background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 40%, transparent);
-}}
-.chip-dot {{ width:8px; height:8px; border-radius:50%; background: var(--c); box-shadow: 0 0 8px var(--c); }}
-.note {{
-  display:flex; gap:10px; align-items:flex-start; padding: 11px 14px; border-radius: 13px; margin: 6px 0 12px 0;
-  background: color-mix(in srgb, var(--c) 9%, transparent); border: 1px solid color-mix(in srgb, var(--c) 28%, transparent);
-  color: #CDD4EA; font-size: 0.9rem; line-height:1.55; animation: fadeUp .5s var(--ease) both;
-}}
-.note b {{ color:#fff; }}
-.explain {{
-  border-radius:14px; padding: 14px 18px; margin: 4px 0 6px 0; font-size: 0.93rem; line-height:1.6; color:#CDD4EA;
-  background: linear-gradient(110deg, color-mix(in srgb, var(--c) 14%, transparent), transparent 80%);
-  border-left: 4px solid var(--c); animation: fadeUp .5s var(--ease) both;
-}}
-.wbadge {{ display:inline-block; font-weight:800; padding:4px 12px; border-radius:999px; font-size:0.85rem; }}
-.wbadge.ok {{ color: var(--good-t); background: rgba(34,197,94,0.14); }}
-.wbadge.off {{ color: #FCD34D; background: rgba(245,158,11,0.14); }}
+.chip {{ display:inline-flex; align-items:center; gap:7px; font-size:0.84rem; color: var(--soft); font-weight: 600;
+  padding:5px 12px; border-radius:999px; margin: 0 6px 6px 0; background: var(--surface); border: 1px solid var(--border); }}
+.chip-dot {{ width:8px; height:8px; border-radius:50%; background: var(--c); }}
+.note {{ display:flex; gap:10px; align-items:flex-start; padding: 11px 15px; border-radius: 14px; margin: 6px 0 12px 0;
+  background: color-mix(in srgb, var(--c) 7%, white); border: 1px solid color-mix(in srgb, var(--c) 24%, white);
+  color: var(--soft); font-size: 0.9rem; line-height:1.55; }}
+.note b {{ color: var(--text); }}
+.explain {{ border-radius:14px; padding: 12px 16px; margin: 6px 0 10px 0; font-size: 0.94rem; line-height:1.6; color: var(--soft);
+  background: color-mix(in srgb, var(--c) 7%, white); border-left: 4px solid var(--c); }}
+.wbadge {{ display:inline-block; font-weight:700; padding:4px 12px; border-radius:999px; font-size:0.86rem; }}
+.wbadge.ok {{ color: var(--good-t); background: var(--good-bg); }}
+.wbadge.off {{ color: var(--accent-d); background: var(--accent-s); }}
 
-/* step flow (how it works) */
-.steps {{ display:grid; grid-template-columns: repeat(var(--n), 1fr); gap: 14px; margin: 6px 0 8px 0; }}
-.step {{ position:relative; background: linear-gradient(165deg, color-mix(in srgb, var(--c) 12%, {SURFACE}), {SURFACE} 65%);
-  border:1px solid color-mix(in srgb, var(--c) 28%, {BORDER}); border-radius:18px; padding:18px 18px 16px;
-  animation: fadeUp .6s var(--ease) both; transition: transform .3s var(--ease), box-shadow .3s ease; }}
-.step:hover {{ transform: translateY(-4px); box-shadow: 0 14px 30px color-mix(in srgb, var(--c) 20%, transparent); }}
-.step:nth-child(2) {{ animation-delay: .1s; }} .step:nth-child(3) {{ animation-delay: .2s; }} .step:nth-child(4) {{ animation-delay: .3s; }}
-.step-num {{ position:absolute; top:12px; right:16px; font-family: var(--display); font-weight:800; font-size:2.3rem;
-  color: color-mix(in srgb, var(--c) 30%, transparent); line-height:1; }}
-.step-icon {{ width:44px; height:44px; border-radius:13px; display:grid; place-items:center; font-size:21px; margin-bottom:10px;
-  background: linear-gradient(135deg, var(--c), color-mix(in srgb, var(--c) 45%, {SURFACE}));
-  box-shadow: 0 8px 20px color-mix(in srgb, var(--c) 35%, transparent); }}
-.step-title {{ font-family: var(--display); font-weight:800; font-size:1.05rem; color:#fff; }}
-.step-text {{ font-size:0.86rem; color:var(--muted); margin-top:4px; line-height:1.5; }}
-.step:not(:last-child)::after {{ content:"→"; position:absolute; right:-14px; top:50%; transform: translate(50%,-50%);
-  width:26px; height:26px; border-radius:50%; display:grid; place-items:center; background:{SURFACE_2};
-  border:1px solid var(--border); color: var(--text); font-weight:800; z-index:2; font-size: 13px; }}
+/* step flow (how it works): a real sequence, so it is numbered */
+.steps {{ display:grid; grid-template-columns: repeat(var(--n), 1fr); gap: 12px; margin: 6px 0 8px 0; }}
+.step {{ position:relative; padding:18px 18px 16px; border-radius: 16px; background: var(--surface);
+  border: 1px solid var(--border); box-shadow: var(--shadow); }}
+.step-num {{ position:absolute; top:12px; right:16px; font-weight:800; font-size:2rem; line-height:1;
+  color: color-mix(in srgb, var(--c) 30%, white); }}
+.step-icon {{ width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-size:20px; margin-bottom:10px;
+  background: color-mix(in srgb, var(--c) 13%, white); }}
+.step-title {{ font-weight:800; font-size:1.02rem; color: var(--text); }}
+.step-text {{ font-size:0.86rem; color: var(--muted); margin-top:4px; line-height:1.5; }}
 
-/* story card: the plain-language answer */
-.story {{ position:relative; overflow:hidden; border-radius:22px; padding: 24px 26px; color:#fff;
-  background: linear-gradient(125deg, var(--c1), var(--c2), var(--c1)); background-size: 220% 220%;
-  animation: gradientShift 14s ease infinite, fadeUp .7s var(--ease) both;
-  box-shadow: 0 18px 50px rgba(0,0,0,0.40); }}
-.story-kicker {{ font-size:.72rem; font-weight:800; letter-spacing:.16em; text-transform:uppercase; opacity:.92; }}
-.story-main {{ font-family: var(--display); font-size: 1.6rem; font-weight:800; line-height:1.3; margin-top:6px; letter-spacing:-.02em; }}
-.story-main .big {{ font-size: 2.45rem; display:inline-block; padding: 0 4px; }}
-.story-grid {{ display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-top:18px; }}
-.story-cell {{ background: rgba(10,15,30,0.25); border:1px solid rgba(255,255,255,0.22); border-radius:15px; padding:12px 14px; backdrop-filter: blur(6px); }}
-.story-cell .t {{ font-size:.76rem; font-weight:700; opacity:.9; text-transform: uppercase; letter-spacing:.08em; }}
-.story-cell .v {{ font-family: var(--display); font-size:1.35rem; font-weight:800; margin-top:2px; }}
-.story-cell .s {{ font-size:.8rem; opacity:.9; margin-top:2px; }}
+/* story card: the plain-language answer, in the banner colours */
+.story {{ position:relative; overflow:hidden; border-radius:20px; padding: 22px 24px; color:#fff; isolation:isolate;
+  background: linear-gradient(120deg, {NAVY}, {NAVY_2}); box-shadow: 0 14px 34px rgba(30,27,94,0.22); }}
+.story::before {{ content:""; position:absolute; inset:0; z-index:-1;
+  background: radial-gradient(480px 240px at 90% 120%, color-mix(in srgb, var(--c1) 55%, transparent), transparent 70%); }}
+.story-kicker {{ font-size:.92rem; font-weight:600; color: #C7D2FE; }}
+.story-main {{ font-size: 1.4rem; font-weight:700; line-height:1.4; margin-top:6px; max-width: 62ch; }}
+.story-main .big {{ font-size: 2.6rem; font-weight: 800; display:inline-block; padding: 0 4px; vertical-align: -3px; color: #fff; }}
+.story-grid {{ display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-top:18px; }}
+.story-cell {{ padding:12px 15px; border-radius:14px; background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18); }}
+.story-cell .t {{ font-size:.84rem; color: #C7D2FE; }}
+.story-cell .v {{ font-size:1.5rem; font-weight:800; margin-top:2px; }}
+.story-cell .s {{ font-size:.82rem; color: rgba(255,255,255,0.78); margin-top:2px; }}
 
 /* 100-dot outcome grid */
-.waffle-wrap {{ display:flex; gap:26px; align-items:center; flex-wrap:wrap; border:1px solid var(--border);
-  background: linear-gradient(180deg, rgba(24,34,64,0.60), rgba(18,26,46,0.60));
-  border-radius:20px; padding:20px 22px; animation: fadeUp .6s var(--ease) both; }}
-.waffle {{ display:grid; grid-template-columns: repeat(20, 18px); gap:5px; }}
-.wd {{ width:18px; height:18px; border-radius:6px; background: var(--c); animation: popIn .45s var(--ease) both;
-  box-shadow: 0 0 10px color-mix(in srgb, var(--c) 45%, transparent); }}
+.waffle-wrap {{ display:flex; gap:28px; align-items:center; flex-wrap:wrap; border:1px solid var(--border);
+  background: var(--surface); border-radius:16px; padding:20px 22px; box-shadow: var(--shadow); }}
+.waffle {{ display:grid; grid-template-columns: repeat(20, 17px); gap:5px; }}
+.wd {{ width:17px; height:17px; border-radius:5px; background: var(--c); }}
 .wlegend {{ flex:1; min-width: 260px; }}
-.wl-row {{ display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px dashed var(--border); font-size:.92rem; color:#CDD4EA; }}
+.wl-row {{ display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); font-size:.92rem; color:var(--soft); }}
 .wl-row:last-child {{ border-bottom:0; }}
-.wl-sw {{ width:14px; height:14px; border-radius:5px; background: var(--c); flex: 0 0 14px; }}
-.wl-n {{ margin-left:auto; font-family: var(--display); font-weight:800; font-size:1.15rem; color: #fff; }}
+.wl-sw {{ width:13px; height:13px; border-radius:4px; background: var(--c); flex: 0 0 13px; }}
+.wl-n {{ margin-left:auto; font-weight:800; font-size:1.3rem; color: var(--text); }}
 
 /* glossary */
-.gloss {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap:10px; }}
-.gl {{ background: var(--surface); border:1px solid var(--border); border-radius:14px; padding:12px 14px; font-size:.87rem; color:#C3CAE0; line-height:1.5; }}
-.gl b {{ display:block; color: #fff; font-family: var(--display); font-size: .98rem; margin-bottom: 2px; }}
+.gloss {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:10px; }}
+.gl {{ padding:13px 15px; font-size:.88rem; color: var(--soft); line-height:1.5; border-radius: 14px; background: var(--surface);
+  border: 1px solid var(--border); box-shadow: var(--shadow); }}
+.gl b {{ display:block; color: var(--text); font-size: .98rem; margin-bottom: 2px; }}
 
 @media (max-width: 900px) {{
-  .steps {{ grid-template-columns: 1fr 1fr; }} .step::after {{ display:none; }}
+  .steps {{ grid-template-columns: 1fr 1fr; }}
   .story-grid {{ grid-template-columns: 1fr; }}
+  .hero svg.hero-line {{ display:none; }}
 }}
 @media (max-width: 640px) {{
-  .hero {{ padding: 22px 18px; }} .hero-title {{ font-size: 1.7rem; }} .kpi-value {{ font-size: 1.35rem; }}
-  .steps {{ grid-template-columns: 1fr; }} .waffle {{ grid-template-columns: repeat(10, 18px); }}
+  .hero {{ padding: 20px 18px; }} .kpi-value {{ font-size: 1.6rem; }} .steps {{ grid-template-columns: 1fr; }}
+  .waffle {{ grid-template-columns: repeat(10, 17px); }}
 }}
 @media (prefers-reduced-motion: reduce) {{
   *, *::before, *::after {{ animation: none !important; transition: none !important; }}
@@ -548,25 +446,26 @@ def sparkline_svg(values, color, cls="kpi-spark", w=200, h=46):
 
 
 def hero(title: str, subtitle: str = "", page: str = "dashboard", eyebrow: str = "", chips=None, line=None):
-    g1, g2, g3 = GRADIENTS.get(page, GRADIENTS["dashboard"])
-    icon = PAGES.get(page, ("📊",))[0]
-    if line is None:                                   # gentle decorative wave
-        t = np.linspace(0, 6.3, 80)
-        line = np.sin(t) * 0.6 + np.sin(t * 2.3) * 0.25 + t * 0.35
-    l_path, a_path = _path(line, 600, 200, pad=8)
-    svg = (f'<svg class="hero-line" viewBox="0 0 600 200" preserveAspectRatio="none">'
-           f'<path d="{a_path}" fill="rgba(255,255,255,0.08)"/>'
-           f'<path class="l" d="{l_path}" fill="none" stroke="rgba(255,255,255,0.85)" stroke-width="2.5" '
-           f'vector-effect="non-scaling-stroke"/></svg>') if l_path else ""
+    """Page banner (navy → indigo): big title, one line of explanation, the portfolio's own line on
+    the right (only when there is real data for it) and a row of read-outs underneath."""
+    g1, g2 = GRADIENTS.get(page, (NAVY, NAVY_2))
+    svg = ""
+    if line is not None:
+        l_path, a_path = _path(line, 600, 200, pad=8)
+        if l_path:
+            svg = (f'<svg class="hero-line" viewBox="0 0 600 200" preserveAspectRatio="none" aria-hidden="true">'
+                   f'<path d="{a_path}" fill="rgba(255,255,255,0.14)"/>'
+                   f'<path class="l" d="{l_path}" fill="none" stroke="#FFFFFF" stroke-width="2.6" '
+                   f'vector-effect="non-scaling-stroke"/></svg>')
     chips_html = ""
     if chips:
         chips_html = '<div class="hero-chips">' + "".join(
             f'<span class="hero-chip">{_e(c)}</span>' for c in chips if c) + "</div>"
-    eb = f'<div class="hero-eyebrow">{icon} {_e(eyebrow)}</div>' if eyebrow else ""
+    eb = f'<div class="hero-eyebrow">{_e(eyebrow)}</div>' if eyebrow else ""
     sub = f'<div class="hero-sub">{_e(subtitle)}</div>' if subtitle else ""
     st.markdown(
-        f'<div class="hero" style="--g1:{g1};--g2:{g2};--g3:{g3}"><div class="orb o1"></div><div class="orb o2"></div>'
-        f'{svg}{eb}<div class="hero-title">{_e(title)}</div>{sub}{chips_html}</div>',
+        f'<div class="hero" style="--g1:{g1};--g2:{g2}"><div class="hero-top"><div class="hero-text">{eb}'
+        f'<div class="hero-title">{_e(title)}</div>{sub}</div>{svg}</div>{chips_html}</div>',
         unsafe_allow_html=True)
 
 
@@ -576,7 +475,7 @@ def ticker(items):
     for name, price, chg, color in items:
         cls = "tk-up" if chg >= 0 else "tk-down"
         arrow = "▲" if chg >= 0 else "▼"
-        cells += (f'<div class="tk"><span class="tk-dot" style="background:{color};box-shadow:0 0 10px {color}"></span>'
+        cells += (f'<div class="tk"><span class="tk-dot" style="background:{color}"></span>'
                   f'<span class="tk-name">{_e(name)}</span><span>{_e(price)}</span>'
                   f'<span class="{cls}">{arrow} {abs(chg):.2f}%</span></div>')
     st.markdown(f'<div class="ticker"><div class="ticker-track">{cells * 4}</div></div>', unsafe_allow_html=True)
@@ -651,8 +550,8 @@ def steps(items):
     st.markdown(f'<div class="steps" style="--n:{len(items)}">{cells}</div>', unsafe_allow_html=True)
 
 
-def story(kicker: str, main_html: str, cells, c1: str = "#C2410C", c2: str = "#7C3AED"):
-    """Big gradient card with the plain-language answer. cells: list of (title, value, sub)."""
+def story(kicker: str, main_html: str, cells, c1: str = ACCENT, c2: str = VIOLET):
+    """Highlighted card with the plain-language answer. cells: list of (title, value, sub)."""
     grid = "".join(f'<div class="story-cell"><div class="t">{_e(t)}</div><div class="v">{_e(v)}</div>'
                    f'<div class="s">{_e(s)}</div></div>' for t, v, s in cells)
     st.markdown(f'<div class="story" style="--c1:{c1};--c2:{c2}"><div class="story-kicker">{_e(kicker)}</div>'
@@ -687,21 +586,26 @@ def weight_badge(total: float):
 
 
 # =========================================================
-# Sidebar: brand + navigation + footer
+# Top bar + settings sidebar
 # =========================================================
+def _go_to_page():
+    """Page switcher callback: open the picked page (clicking the open page again keeps it open)."""
+    pick = st.session_state.get("nav_page")
+    if pick in PAGES:
+        st.session_state["view"] = pick
+
+
 def sidebar_nav(current: str):
-    st.sidebar.markdown(
-        '<div class="brand"><div class="brand-logo">📈</div><div>'
-        '<div class="brand-name">Multi-Asset Lab</div>'
-        '<div class="brand-sub">BACKTEST · SIMULATE · INR ₹</div></div></div>',
-        unsafe_allow_html=True)
-    st.sidebar.markdown('<div class="side-label">Navigate</div>', unsafe_allow_html=True)
-    for key, (icon, label, _) in PAGES.items():
-        if st.sidebar.button(f"{icon}   {label}", key=f"nav_{key}", width="stretch",
-                             type="primary" if key == current else "secondary"):
-            if key != current:
-                st.session_state["view"] = key
-                st.rerun()
+    """Top bar (brand + page switcher) across the page, and the title of the settings sidebar.
+    (Name kept from the old sidebar navigation so every page keeps calling it the same way.)"""
+    st.session_state["nav_page"] = current                    # the switcher always shows the open page
+    with st.container(key="topbar", horizontal=True, vertical_alignment="center"):
+        st.markdown('<div class="brand"><div class="brand-mark">₹</div>'
+                    '<div class="brand-name">Multi-Asset Lab</div></div>', unsafe_allow_html=True)
+        st.segmented_control("Page", list(PAGES), format_func=lambda k: f"{PAGES[k][0]} {PAGES[k][1]}",
+                             key="nav_page", on_change=_go_to_page, label_visibility="collapsed")
+    st.sidebar.markdown(f'<div class="side-title">Settings</div>'
+                        f'<div class="side-hint">For {_e(PAGES[current][1])}</div>', unsafe_allow_html=True)
 
 
 def sidebar_label(text: str):
@@ -719,25 +623,67 @@ def sidebar_footer(fetch_errors, key: str = "main"):
                 st.write(f"**{name}:** {err}")
 
 
-# =========================================================
-# Plotly chart theme (dark)
-# =========================================================
-CHART_FONT = "Plus Jakarta Sans, system-ui, sans-serif"
-GRID = "rgba(138,148,179,0.11)"
 
-_template = go.layout.Template(pio.templates["plotly_dark"])
+# =========================================================
+# "Show more" switches: extra detail stays hidden (and is not even built) until you switch it on
+# =========================================================
+def reveal(label: str, key: str, help: str = None) -> bool:
+    """A switch for extra detail (tables, extra charts). Returns True when it is on."""
+    with st.container(key=f"reveal_{key}"):
+        return st.toggle(label, key=key, help=help)
+
+
+def action_bar(download=None, toggles=()):
+    """One row with a Download CSV button and "show" switches.
+    download: dict(label, data, file_name, key) or None.  toggles: list of (label, key).
+    Returns {key: True/False} for the switches."""
+    states = {}
+    with st.container(key=f"actions_{(download or {}).get('key') or (toggles[0][1] if toggles else 'x')}",
+                      horizontal=True, vertical_alignment="center"):
+        if download:
+            st.download_button(download['label'], download['data'], file_name=download['file_name'],
+                               mime="text/csv", key=download['key'])
+        for label, key in toggles:
+            with st.container(key=f"reveal_{key}"):
+                states[key] = st.toggle(label, key=key)
+    return states
+
+
+# =========================================================
+# Keeping widget values
+# =========================================================
+def start_value(key: str, value, options=None):
+    """Give a widget its starting value through st.session_state (instead of value= / index= / default=),
+    so it can be kept without Streamlit warnings. With `options`, a saved value that is no longer
+    one of the options is reset (lists are filtered)."""
+    if key not in st.session_state:
+        st.session_state[key] = value
+    elif options is not None:
+        cur = st.session_state[key]
+        if isinstance(cur, list):
+            st.session_state[key] = [v for v in cur if v in options]
+        elif cur not in options:
+            st.session_state[key] = value
+
+
+# =========================================================
+# Plotly chart theme (light)
+# =========================================================
+CHART_FONT = "Manrope, system-ui, sans-serif"
+GRID = "#EDF0F6"
+
+_template = go.layout.Template(pio.templates["plotly_white"])
 _template.layout.update(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family=CHART_FONT, color="#C7CEE3", size=12),
-    title=dict(font=dict(size=16, color=TEXT, family="Bricolage Grotesque, " + CHART_FONT), x=0.01, xanchor="left"),
-    colorway=[VIOLET, CYAN, AMBER, PINK, EMERALD, BLUE, ORANGE, ROSE],
+    font=dict(family=CHART_FONT, color=SOFT, size=12),
+    title=dict(font=dict(size=15, color=TEXT, family=CHART_FONT), x=0.01, xanchor="left"),
+    colorway=[INDIGO, TEAL, ORANGE, PINK, BLUE, VIOLET, EMERALD, ROSE],
     xaxis=dict(gridcolor=GRID, zeroline=False, linecolor=BORDER, tickcolor=BORDER, showspikes=False),
     yaxis=dict(gridcolor=GRID, zeroline=False, linecolor=BORDER, tickcolor=BORDER),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#C7CEE3"), traceorder="normal"),
-    hoverlabel=dict(bgcolor=SURFACE_2, bordercolor="#33406A", font=dict(color=TEXT, family=CHART_FONT)),
-    margin=dict(l=12, r=12, t=56, b=12),
-    transition=dict(duration=500, easing="cubic-in-out"),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=SOFT), traceorder="normal"),
+    hoverlabel=dict(bgcolor=SURFACE, bordercolor=BORDER, font=dict(color=TEXT, family=CHART_FONT)),
+    margin=dict(l=12, r=12, t=52, b=12),
 )
 pio.templates["lab"] = _template
 

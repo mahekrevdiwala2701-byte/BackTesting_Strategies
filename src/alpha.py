@@ -1,4 +1,4 @@
-"""Monthly alpha of a whole portfolio against one benchmark index (no Streamlit code here).
+"""Alpha of a whole portfolio against one benchmark index (no Streamlit code here).
 
 The portfolio is built with one of the 3 strategies of the Calculated Investment page:
 
@@ -6,11 +6,10 @@ The portfolio is built with one of the 3 strategies of the Calculated Investment
     periodic  Rebalance           : back to the same weights every month / quarter / half-year / year
     diff      Different Weights   : weights re-assigned by past growth on every rebalance date
 
-For every month:
-    portfolio return = value at month end / value at the end of the previous month − 1
-    benchmark return = benchmark close at month end / close at the end of the previous month − 1
-    alpha (%)        = portfolio return − benchmark return
-    alpha (₹)        = alpha (%) × portfolio value at the start of the month
+For every week / month / quarter / half-year / year:
+    portfolio return = value at the period end / value at the end of the previous period − 1
+    benchmark return = benchmark close at the period end / close at the end of the previous period − 1
+    alpha (%)        = portfolio return − benchmark return   (the "active return")
 """
 import pandas as pd
 
@@ -72,13 +71,49 @@ def calculated_investment_values(asset_dfs, weights, amount, start_date, end_dat
 
 
 # ---------------------------------------------------------
-# Monthly alpha
+# Alpha per week / month / quarter / half-year / year
 # ---------------------------------------------------------
-def monthly_alpha(values, bench):
-    """One row per month: portfolio and benchmark return, alpha in % and ₹, and the alpha built up so far.
+FREQUENCIES = {                 # label -> (unit, pandas period code)
+    "Weekly": ("week", "W-FRI"),
+    "Monthly": ("month", "M"),
+    "Quarterly": ("quarter", "Q"),
+    "Half-yearly": ("half-year", "H"),
+    "Yearly": ("year", "Y"),
+}
+
+
+def _period_keys(dates, freq):
+    """For each date: (period label, first day of the period, last day of the period)."""
+    code = FREQUENCIES[freq][1]
+    if code == "H":                                            # Jan-Jun and Jul-Dec
+        first_half = dates.month <= 6
+        labels = [f"{'Jan–Jun' if h else 'Jul–Dec'} {y}" for h, y in zip(first_half, dates.year)]
+        starts = [pd.Timestamp(y, 1 if h else 7, 1) for h, y in zip(first_half, dates.year)]
+        ends = [pd.Timestamp(y, 6, 30) if h else pd.Timestamp(y, 12, 31) for h, y in zip(first_half, dates.year)]
+        return pd.Index(labels), pd.DatetimeIndex(starts), pd.DatetimeIndex(ends)
+    p = dates.to_period(code)
+    starts, ends = p.start_time.normalize(), p.end_time.normalize()
+    if code == "W-FRI":
+        labels = ["Week to " + e.strftime('%d-%b-%y') for e in ends]
+    elif code == "M":
+        labels = list(p.strftime('%b-%y'))
+    elif code == "Q":
+        labels = [f"{s:%b}–{e:%b} {e:%Y}" for s, e in zip(starts, ends)]
+    else:
+        labels = [str(y) for y in p.year]
+    return pd.Index(labels), starts, ends
+
+
+def period_alpha(values, bench, freq="Monthly"):
+    """One row per period, oldest first:
+
+        Benchmark index / Portfolio index : value at the end of the period, both starting at 100
+        Benchmark (%) / Portfolio (%)     : return in that period
+        Alpha (%)                         : Portfolio (%) − Benchmark (%)   (active return)
 
     values : portfolio value (₹) every day
-    bench  : benchmark close prices (any dates; the last close on or before each day is used)
+    bench  : benchmark close prices (the last close on or before each day is used)
+    A period that is cut short by the start or end date is kept and marked 'Partial'.
     """
     values = values.dropna()
     values = values[~values.index.duplicated(keep='last')].sort_index()
@@ -89,60 +124,52 @@ def monthly_alpha(values, bench):
     if len(df) < 2:
         return pd.DataFrame()
 
-    start = df.iloc[0]
-    month = df.index.to_period('M')
-    ends = df.groupby(month).last()
-    end_dates = pd.Series(df.index, index=df.index).groupby(month).last()
+    labels, starts, ends = _period_keys(df.index, freq)
+    key = pd.Series(labels, index=df.index)
+    last = df.groupby(key.values, sort=False).last()
+    last_date = pd.Series(df.index, index=df.index).groupby(key.values, sort=False).last()
+    p_start = pd.Series(starts, index=df.index).groupby(key.values, sort=False).first()
+    p_end = pd.Series(ends, index=df.index).groupby(key.values, sort=False).first()
 
-    p_prev, b_prev, d_prev = start['P'], start['B'], df.index[0]
+    tol = pd.Timedelta(days=2 if freq == "Weekly" else 4)
+    first_day = df.index[0]
+    p0, b0 = df['P'].iloc[0], df['B'].iloc[0]
+    p_prev, b_prev, d_prev = p0, b0, first_day
     rows = []
-    for (per, row), d_end in zip(ends.iterrows(), end_dates):
-        if d_end == d_prev:                                     # first month holds only the starting day
+    for lab, row in last.iterrows():
+        d_end = last_date[lab]
+        if d_end == first_day:                                   # this period holds only the starting day
             continue
-        p_ret = row['P'] / p_prev - 1
-        b_ret = row['B'] / b_prev - 1
-        part = []
-        if d_prev == df.index[0] and d_prev.day > 7:
-            part.append(f"from {d_prev:%d-%m}")
-        if d_end < per.end_time.normalize() - pd.Timedelta(days=4):
-            part.append(f"till {d_end:%d-%m}")
+        p_ret, b_ret = row['P'] / p_prev - 1, row['B'] / b_prev - 1
+        partial = ((d_prev == first_day and first_day > p_start[lab] + tol)
+                   or d_end < p_end[lab] - tol)
         rows.append({
-            'Month': per.strftime('%b %Y'),
-            'From': d_prev, 'To': d_end,
-            'Value at start (₹)': p_prev, 'Value at end (₹)': row['P'],
-            'Portfolio (%)': p_ret * 100,
+            'Period': lab, 'From': d_prev, 'To': d_end,
+            'Benchmark index': row['B'] / b0 * 100,
+            'Portfolio index': row['P'] / p0 * 100,
             'Benchmark (%)': b_ret * 100,
+            'Portfolio (%)': p_ret * 100,
             'Alpha (%)': (p_ret - b_ret) * 100,
-            'Alpha (₹)': (p_ret - b_ret) * p_prev,
-            'Total alpha so far (%)': ((row['P'] / start['P']) / (row['B'] / start['B']) - 1) * 100,
-            'Part month': " · ".join(part),
+            'Partial': bool(partial),
         })
         p_prev, b_prev, d_prev = row['P'], row['B'], d_end
     out = pd.DataFrame(rows)
-    out.attrs['start'] = {'date': df.index[0], 'value': start['P'], 'bench': start['B']}
-    out.attrs['end'] = {'date': df.index[-1], 'value': df['P'].iloc[-1], 'bench': df['B'].iloc[-1]}
+    out.attrs['start'] = first_day
     return out
 
 
-def alpha_summary(m):
-    """Whole-period numbers for a monthly_alpha() table."""
-    if m is None or m.empty:
+def alpha_summary(t):
+    """Headline numbers for a period_alpha() table."""
+    if t is None or t.empty:
         return {}
-    s, e = m.attrs['start'], m.attrs['end']
-    years = max((e['date'] - s['date']).days / 365.25, 1e-9)
-    p_growth, b_growth = e['value'] / s['value'], e['bench'] / s['bench']
-    a = m['Alpha (%)']
+    a = t['Alpha (%)']
     return {
-        'months': int(len(m)),
-        'years': years,
-        'port_total': (p_growth - 1) * 100,
-        'bench_total': (b_growth - 1) * 100,
-        'alpha_total': (p_growth / b_growth - 1) * 100,
-        'alpha_rupees': e['value'] - s['value'] * b_growth,      # vs the same money in the benchmark
-        'port_cagr': (p_growth ** (1 / years) - 1) * 100,
-        'bench_cagr': (b_growth ** (1 / years) - 1) * 100,
+        'periods': int(len(t)),
         'beat': int((a > 0).sum()),
-        'avg_month': float(a.mean()),
-        'best': m.loc[a.idxmax()],
-        'worst': m.loc[a.idxmin()],
+        'avg': float(a.mean()),
+        'median': float(a.median()),
+        'best': t.loc[a.idxmax()],
+        'worst': t.loc[a.idxmin()],
+        'port_total': float(t['Portfolio index'].iloc[-1] - 100),
+        'bench_total': float(t['Benchmark index'].iloc[-1] - 100),
     }

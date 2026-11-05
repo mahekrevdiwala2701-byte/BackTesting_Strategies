@@ -1,19 +1,19 @@
 [theme]
-base = "dark"
-primaryColor = "#8B5CF6"
-backgroundColor = "#0A0F1E"
-secondaryBackgroundColor = "#141B2F"
-textColor = "#E6EAF5"
-borderColor = "#232D4A"
+base = "light"
+primaryColor = "#4F46E5"
+backgroundColor = "#F3F5FA"
+secondaryBackgroundColor = "#EEF1F7"
+textColor = "#0F1B3D"
+borderColor = "#E2E7F0"
 baseRadius = "0.75rem"
-font = "'Plus Jakarta Sans':https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
-headingFont = "'Bricolage Grotesque':https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap"
+font = "'Manrope':https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap"
+headingFont = "'Manrope':https://fonts.googleapis.com/css2?family=Manrope:wght@600;700;800&display=swap"
 showWidgetBorder = true
 
 [theme.sidebar]
-backgroundColor = "#0D1426"
-secondaryBackgroundColor = "#17203A"
-borderColor = "#1F2944"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F5FA"
+borderColor = "#E2E7F0"
 
 [client]
 toolbarMode = "minimal"

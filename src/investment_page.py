@@ -8,7 +8,7 @@ from src.ui import (
     panel,
     PLOT_LAYOUT, STRAT_COLORS, VIOLET, CYAN, EMERALD, AMBER, BLUE, BAD, FAINT, TEXT, MUTED,
     hero, section, kpi_row, tone_of, note, explain, chart, hex_rgba, inr, inr_short, pct,
-    sidebar_nav, sidebar_footer,
+    sidebar_nav, sidebar_footer, action_bar,
 )
 from src.asset_data import ASSETS, ASSET_LABELS, ASSET_SHORT, ASSET_ICONS, COLORS, style_change_cols, blank_missing
 from src.period_picker import period_selector
@@ -231,9 +231,6 @@ def render_investment_page(asset_dfs, fetch_errors):
              f"(CAGR {cagr:.2f}% vs {bh_cagr:.2f}%, max drawdown {max_dd:.1f}% vs {bh_dd:.1f}%).",
              verdict_color, "🏆" if diff >= 0 else "📉")
 
-    if decisions is not None:
-        _render_weight_decisions(decisions, lookback_label)
-
     # ---------------- Charts ----------------
     section("Growth over time", "Your total next to buy & hold, and how each holding moved", "📈", BLUE)
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.09, row_heights=[0.55, 0.45],
@@ -279,29 +276,35 @@ def render_investment_page(asset_dfs, fetch_errors):
     with panel():
         chart(fig_w, key="inv_weights")
 
-    # ---------------- Breakdown table ----------------
-    section("Asset-wise breakdown", "Net invested = money put in minus money taken out at rebalances", "📋",
-            AMBER)
-    total_row = pd.DataFrame([{
-        'Asset': '🧾 TOTAL', 'Starting Weight (%)': 100.0, 'Latest Target Weight (%)': 100.0,
-        'Current Weight (%)': 100.0, 'Net Invested (₹)': invested, 'Units Held': float('nan'), 'Latest Date': '',
-        'Latest Price (₹)': float('nan'), 'Current Value (₹)': current, 'Profit / Loss (₹)': profit, 'Return (%)': ret_pct,
-    }])
-    table = pd.concat([result, total_row], ignore_index=True)
-    if mode != "diff":
-        table = table.drop(columns=['Latest Target Weight (%)'])
-    money2 = lambda v: inr(v, 2)  # noqa: E731
-    tfmt = {
-        'Starting Weight (%)': '{:.2f}%', 'Latest Target Weight (%)': '{:.2f}%', 'Current Weight (%)': '{:.2f}%',
-        'Net Invested (₹)': money2, 'Units Held': '{:,.4f}', 'Latest Price (₹)': money2,
-        'Current Value (₹)': money2, 'Profit / Loss (₹)': lambda v: inr(v, 2, sign=True), 'Return (%)': '{:+.2f}%'}
-    tfmt = {k: v for k, v in tfmt.items() if k in table.columns}
-    table, tfmt = blank_missing(table, tfmt)
-    styler = table.style.format(tfmt)
-    st.dataframe(style_change_cols(styler, ['Profit / Loss (₹)', 'Return (%)']), width="stretch", hide_index=True)
-
-    _render_rebalance_data(schedule, trade_log, used, prices, units_df, values, current,
-                           start_date, end_date, decisions, lookback_label)
+    # ---------------- Extras behind buttons ----------------
+    section("Data & more", "The asset-wise table and every rebalance, when you need them", "📥", AMBER)
+    on = action_bar(toggles=[("📋 Asset-wise breakdown", "inv_show_breakdown"), ("🧾 Rebalance log", "inv_show_log")])
+    if on["inv_show_breakdown"]:
+        # ---------------- Breakdown table ----------------
+        section("Asset-wise breakdown", "Net invested = money put in minus money taken out at rebalances", "📋",
+                AMBER)
+        total_row = pd.DataFrame([{
+            'Asset': '🧾 TOTAL', 'Starting Weight (%)': 100.0, 'Latest Target Weight (%)': 100.0,
+            'Current Weight (%)': 100.0, 'Net Invested (₹)': invested, 'Units Held': float('nan'), 'Latest Date': '',
+            'Latest Price (₹)': float('nan'), 'Current Value (₹)': current, 'Profit / Loss (₹)': profit, 'Return (%)': ret_pct,
+        }])
+        table = pd.concat([result, total_row], ignore_index=True)
+        if mode != "diff":
+            table = table.drop(columns=['Latest Target Weight (%)'])
+        money2 = lambda v: inr(v, 2)  # noqa: E731
+        tfmt = {
+            'Starting Weight (%)': '{:.2f}%', 'Latest Target Weight (%)': '{:.2f}%', 'Current Weight (%)': '{:.2f}%',
+            'Net Invested (₹)': money2, 'Units Held': '{:,.4f}', 'Latest Price (₹)': money2,
+            'Current Value (₹)': money2, 'Profit / Loss (₹)': lambda v: inr(v, 2, sign=True), 'Return (%)': '{:+.2f}%'}
+        tfmt = {k: v for k, v in tfmt.items() if k in table.columns}
+        table, tfmt = blank_missing(table, tfmt)
+        styler = table.style.format(tfmt)
+        st.dataframe(style_change_cols(styler, ['Profit / Loss (₹)', 'Return (%)']), width="stretch", hide_index=True)
+    if on["inv_show_log"]:
+        if decisions is not None:
+            _render_weight_decisions(decisions, lookback_label)
+        _render_rebalance_data(schedule, trade_log, used, prices, units_df, values, current,
+                               start_date, end_date, decisions, lookback_label)
 
 
 def _result_cards(invested, current, profit, ret_pct, cagr, years, max_dd, accent):
