@@ -1,17 +1,16 @@
-"""🎲 Monte Carlo page, built to be understood without a finance degree.
+"""💼 Everyday Portfolio: invest an amount split across GoldBEES / LargeCap / MidCap / SmallCap by your weights.
 
-Flow of the page:
-  1. How it works          : 4 simple steps
-  2. Pick a strategy       : Buy & Hold / Rebalance / Different Weights
-  3. Your mix              : sliders for the 4 weights (+ rebalance settings)
-  4. The answer in words   : typical / bad case / great case / chance of loss
-  5. 100 possible futures  : a dot grid showing how many futures end where
-  6. Charts                : path over time, bell curve, yearly growth, worst falls, percentile table
-  7. Explore every mix     : best combinations, weight effects, settings compared, full tables
-  8. Glossary
+Year-on-year chained logic, per index (default start = 01-01-2015):
+  * Year 1 (start → one year later): index value = actual Close price.
+  * Every later day d: YoY % = price(d) / price(same day one year earlier) − 1,
+    applied to the index value at the end of the previous year.
+  * If that day last year was a holiday, the last trading day before it is used.
 
-The maths lives in src/monte_carlo.py.
+Each holding = (amount × weight) × index value(d) / index value(first day),
+so all 4 lines are in ₹ of YOUR money and can be compared on one chart.
 """
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -19,597 +18,434 @@ import streamlit as st
 
 from src.ui import (
     panel,
-    PLOT_LAYOUT, STRAT_COLORS, GOOD, BAD, TEXT, INK, MUTED, FAINT,
-    VIOLET, CYAN, EMERALD, AMBER, BLUE, PINK, ORANGE,
-    hero, section, kpi_row, note, explain, steps, story, waffle, glossary, chart, hex_rgba, inr_short,
-    weight_badge, sidebar_nav, sidebar_footer, sidebar_label, action_bar,
+    PLOT_LAYOUT, VIOLET, CYAN, EMERALD, AMBER, BLUE, BAD, FAINT, INK, PINK, MUTED, hex_rgba,
+    hero, section, kpi, kpi_row, tone_of, note, chart, inr, inr_short, pct as fmt_pct,
+    sidebar_nav, sidebar_footer, sidebar_label, weight_badge, action_bar,
 )
-from src.asset_data import ASSETS, ASSET_SHORT, ASSET_ICONS, COLORS
-from src.strategies import STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS
-from src import monte_carlo as mc
+from src.asset_data import ASSETS, ASSET_LABELS, ASSET_SHORT, ASSET_ICONS, COLORS, style_change_cols, blank_missing
+from src.period_picker import today_ist
 
-# Fixed simulation settings
-N_SIMS = 5000          # futures for YOUR mix
-BLOCK = 12             # chunks of 12 real months (keeps yearly trends & crashes intact)
-SEED = 42              # same seed = same result every time
-AMOUNT = 100000.0      # ₹1,00,000
-YEARS = 10             # horizon
-COMBO_SIMS = 1000      # Buy & Hold / Rebalance: futures per weight combination (287 combinations)
-DIFF_SIMS = 2000       # Different Weights: futures per weight set & setting (24 sets x 6 settings)
-WEIGHT_STEP = 10       # every split in 10% steps
-
-STRATEGY_HELP = {
-    "bh": "Split the money once and never touch it again. Winners grow into a bigger slice over time.",
-    "periodic": "Every month / quarter / half-year / year, sell a little of what grew and buy what fell, "
-                "so the split goes back to your weights.",
-    "diff": "On each rebalance date, look at how much each asset grew recently. The one that grew the MOST gets "
-            "your SMALLEST weight, the one that grew the LEAST gets your BIGGEST weight (buy the laggards).",
-}
-
-GLOSSARY = [
-    ("Typical (median)", "Half of all simulated futures ended above this, half below. The best single guess."),
-    ("Average (mean)", "Add up every ending and divide. A few huge winners pull it above the typical value."),
-    ("Bad case (5th percentile)", "Only 1 future in 20 ended lower than this. A realistic 'things went badly'."),
-    ("Great case (95th percentile)", "Only 1 future in 20 ended higher. A realistic 'things went very well'."),
-    ("Chance of losing money", "Share of futures that ended with less than the amount you put in."),
-    ("CAGR", "The steady yearly growth rate that would give the same final amount."),
-    ("Max drawdown (worst fall)", "The biggest drop from a high point to a later low during the 10 years."),
-    ("Block bootstrap", "Building new futures from real 12-month chunks of history, shuffled in random order."),
-]
+DEFAULT_START = date(2015, 1, 1)
+PORTFOLIO_COLOR = INK
+ROLL_WINDOWS = {"1 Year": 1, "3 Years": 3, "5 Years": 5}
 
 
-def _inr(v):
-    return inr_short(v)
+# ---------------------------------------------------------
+# Core calculation
+# ---------------------------------------------------------
+def yoy_chain(prices: pd.Series, start, end) -> pd.DataFrame:
+    """prices: Close indexed by Date. Returns frame with Close, Prev Year Close, YoY (%), Index Value, Year No."""
+    prices = prices[~prices.index.duplicated(keep='last')].sort_index().dropna()
+    start_ts = max(pd.Timestamp(start), prices.index.min())
+    end_ts = pd.Timestamp(end)
+
+    p = prices[(prices.index >= start_ts) & (prices.index <= end_ts)]
+    if p.empty:
+        return pd.DataFrame()
+
+    # Price on the same calendar day one year earlier (or last trading day before it)
+    prev_dates = p.index - pd.DateOffset(years=1)
+    pos = prices.index.searchsorted(prev_dates, side='right') - 1
+    prev = pd.Series(np.where(pos >= 0, prices.values[np.clip(pos, 0, None)], np.nan), index=p.index)
+
+    # Year number since start (0 = base year)
+    year_idx = pd.Series(0, index=p.index)
+    k = 1
+    while start_ts + pd.DateOffset(years=k) <= p.index.max():
+        year_idx[p.index >= start_ts + pd.DateOffset(years=k)] = k
+        k += 1
+
+    yoy = p / prev - 1
+    value = pd.Series(np.nan, index=p.index)
+    base = year_idx == 0
+    value[base] = p[base]                       # year 1 = real prices
+    anchor = p[base].iloc[-1]                   # value at end of previous year
+    for y in range(1, int(year_idx.max()) + 1):
+        mask = year_idx == y
+        if not mask.any():
+            continue
+        value[mask] = (anchor * (1 + yoy[mask])).ffill().fillna(anchor)
+        anchor = value[mask].iloc[-1]
+
+    yoy[base] = np.nan
+    return pd.DataFrame({'Close': p, 'Prev Year Close': prev.where(~base),
+                         'YoY (%)': yoy * 100, 'Index Value': value, 'Year No.': year_idx})
 
 
-def _mult(v):
-    return f"{v / AMOUNT:.1f}×"
+def drop_glitches(prices: pd.Series, limit: float = 0.5):
+    """Remove obvious data-entry errors: a run of prices that jumps more than `limit` (50%) away from the last
+    good price and later comes back to it (e.g. GoldBEES prices pasted into the Nifty sheet for a few months).
+    A jump that never comes back is treated as real and kept. Returns (clean series, rows removed)."""
+    s = prices.dropna().sort_index()
+    vals = s.to_numpy(dtype=float)
+    bad = np.zeros(len(vals), dtype=bool)
+    if len(vals):
+        last_good, run = vals[0], []
+        for i in range(1, len(vals)):
+            if abs(vals[i] / last_good - 1) > limit:
+                run.append(i)
+            else:
+                if run:
+                    bad[run] = True
+                last_good, run = vals[i], []
+    return s[~bad], int(bad.sum())
 
 
-# =========================================================
-# Cached simulations
-# =========================================================
-@st.cache_data(show_spinner=False)
-def _simulate_mix(rets, weights, mode, every, lookback):
-    """Your own mix on N_SIMS futures. Returns (paths, stats)."""
-    n_months = YEARS * 12
-    warmup = max(18, lookback or 0)
-    growth = mc.bootstrap_paths(rets, N_SIMS, warmup + n_months, min(BLOCK, len(rets)), SEED)
-    path = mc.run_strategy(growth, np.asarray(weights, dtype=float), AMOUNT, mode, every or 12, lookback or 12,
-                           warmup)
-    return path, mc.summarize(path, AMOUNT, YEARS)
+def rolling_return(series: pd.Series, years: int) -> pd.Series:
+    """Return over the `years` before every date, in %: value(d) / value(same day `years` earlier) − 1.
+    If that earlier day was a holiday, the last trading day before it is used. Windows longer than one
+    year are annualised (CAGR), so 1-, 3- and 5-year numbers can be compared directly."""
+    s = series.dropna().sort_index()
+    s = s[~s.index.duplicated(keep='last')]
+    if s.empty:
+        return pd.Series(dtype=float)
+    back = s.index - pd.DateOffset(years=years)
+    pos = s.index.searchsorted(back, side='right') - 1
+    ok = pos >= 0
+    prev = np.where(ok, s.values[np.clip(pos, 0, None)], np.nan)
+    growth = s.values / prev
+    r = growth ** (1 / years) - 1 if years > 1 else growth - 1
+    return pd.Series(np.where(ok, r * 100, np.nan), index=s.index)
 
 
-@st.cache_data(show_spinner=False, persist="disk")
-def _simulate_combos(rets, mode):
-    settings = {'Buy & Hold': None} if mode == 'bh' else dict(REBAL_FREQ)
-    return mc.run_combos(rets, AMOUNT, YEARS, COMBO_SIMS, min(BLOCK, len(rets)), settings, WEIGHT_STEP, SEED)
+def value_one_year_ago(s: pd.Series, d: pd.Timestamp):
+    past = s[s.index <= d - pd.DateOffset(years=1)]
+    return past.iloc[-1] if not past.empty else np.nan
 
 
-@st.cache_data(show_spinner=False, persist="disk")
-def _simulate_diff_all(rets):
-    return mc.run_diff_all_weights(rets, AMOUNT, YEARS, DIFF_SIMS, min(BLOCK, len(rets)),
-                                   DIFF_REBAL_FREQ, LOOKBACK_OPTIONS, WEIGHT_STEP, SEED)
+def money(v):
+    return "—" if pd.isna(v) else inr(v, 2)
 
 
-def _kde(x, grid):
-    """Smooth bell-curve line (Gaussian kernel density)."""
-    x = np.asarray(x, dtype=float)
-    std = x.std()
-    if std == 0 or len(x) < 2:
-        return np.zeros_like(grid)
-    bw = 1.06 * std * len(x) ** (-1 / 5)
-    if len(x) > 3000:
-        x = np.random.default_rng(0).choice(x, 3000, replace=False)
-    z = (grid[:, None] - x[None, :]) / bw
-    return np.exp(-0.5 * z ** 2).sum(axis=1) / (len(x) * bw * np.sqrt(2 * np.pi))
+def pct(v):
+    return "—" if pd.isna(v) else f"{v:+.2f}%"
 
 
-def _out_of_100(final):
-    """Bucket the final values into 5 groups and round to whole dots that add up to 100."""
-    edges = [(-np.inf, 1), (1, 2), (2, 3), (3, 5), (5, np.inf)]
-    labels = ["Ended with LESS than you put in", "Grew, but less than double (1–2×)", "Doubled to tripled (2–3×)",
-              "Tripled to 5× (3–5×)", "More than 5×"]
-    colors = [BAD, ORANGE, BLUE, VIOLET, EMERALD]
-    m = np.asarray(final) / AMOUNT
-    shares = np.array([((m >= lo) & (m < hi)).mean() * 100 for lo, hi in edges])
-    counts = np.floor(shares).astype(int)
-    for i in np.argsort(-(shares - counts))[:100 - counts.sum()]:
-        counts[i] += 1
-    return [(lbl, n, c) for lbl, n, c in zip(labels, counts, colors)]
-
-
-# =========================================================
+# ---------------------------------------------------------
 # Page
-# =========================================================
-def render_monte_carlo_page(asset_dfs, fetch_errors):
-    sidebar_nav("montecarlo")
-    sidebar_label("🎛️ Simulation settings")
-    st.sidebar.markdown(f"- Amount **{_inr(AMOUNT)}**\n- Horizon **{YEARS} years**\n"
-                        f"- **{N_SIMS:,}** futures for your mix\n- Built from **{BLOCK}-month** real chunks\n"
-                        f"- Seed **{SEED}** (same result every time)")
-    sidebar_footer(fetch_errors, key="mc")
+# ---------------------------------------------------------
+def render_everyday_portfolio_page(asset_dfs, fetch_errors):
+    today = today_ist()
 
-    used = [n for n in ASSETS if n in asset_dfs]
-    if not used:
-        note("No asset data loaded.", BAD, "⛔")
-        st.stop()
-    rets, dropped = mc.monthly_returns(asset_dfs, used)
+    # ---------------- Sidebar ----------------
+    sidebar_nav("portfolio")
+    sidebar_label("📅 Period")
+    data_min = min(df['Date'].min() for df in asset_dfs.values()).date()
+    min_start = min(data_min, DEFAULT_START)
+    start = st.sidebar.date_input("📍 Start date (base year begins)", value=max(DEFAULT_START, min_start),
+                                  min_value=min_start, max_value=today, format="DD-MM-YYYY", key="ep_start")
+    end = st.sidebar.date_input("🏁 End date", value=today, min_value=min_start, max_value=today,
+                                format="DD-MM-YYYY", key="ep_end")
+    if start > end:
+        st.sidebar.error("Start date must be before End date. Showing them swapped.")
+        start, end = end, start
 
-    hero("Monte Carlo Simulation",
-         "What could ₹1 lakh become in 10 years? We replay real market history in thousands of different orders "
-         "and count how often each outcome happens.",
-         page="montecarlo", eyebrow="What could happen next",
-         chips=[f"💰 {_inr(AMOUNT)} invested", f"⏳ {YEARS}-year horizon", f"📚 {len(rets)} real months of history"])
+    sidebar_label("💰 Investment")
+    amount = st.sidebar.number_input("Total investment (₹)", min_value=1000.0, value=100000.0,
+                                     step=5000.0, format="%.0f", key="ep_amount")
 
-    if len(rets) < 24:
-        note(f"Only {len(rets)} months where all assets have data. At least 2 years are needed.", BAD, "⛔")
-        st.stop()
+    available = [a for a in ASSETS if a in asset_dfs]
+    sidebar_label("⚖️ Weights (%)")
+    default_w = round(100 / len(available), 2) if available else 0.0
+    raw_w = {a: st.sidebar.number_input(f"{ASSET_ICONS[a]} {ASSET_SHORT[a]}", min_value=0.0, max_value=100.0,
+                                        value=default_w, step=5.0, key=f"ep_w_{a}") for a in available}
+    total_w = sum(raw_w.values())
+    with st.sidebar:
+        weight_badge(total_w)
 
-    # ---------------- 2. Strategy ----------------
-    section("Pick a strategy", "How the money is managed during the 10 years", "🧭", VIOLET)
-    mode = st.radio("Strategy", list(STRATEGIES.keys()), format_func=lambda k: STRATEGIES[k],
-                    horizontal=True, key="mc_mode", label_visibility="collapsed")
-    color = STRAT_COLORS[mode]
-    explain(STRATEGY_HELP[mode], color)
+    sidebar_label("📈 Chart")
+    chart_mode = st.sidebar.radio("Show", ["₹ Value", "% Return"], horizontal=True, key="ep_mode")
+    show_total = st.sidebar.checkbox("Show total portfolio line", value=True, key="ep_total")
+    sidebar_footer(fetch_errors, key="ep")
 
-    # ---------------- 3. Your mix ----------------
-    section("Your mix", "Move the sliders: the results below update instantly", "🎚️", PINK)
-    every, lookback, setting_label = None, None, ""
+    # ---------------- Hero ----------------
+    hero("Everyday Portfolio",
+         "Year 1 uses real prices. After that, each day's change versus the same day last year is applied "
+         "to the previous year-end value, so you can follow your money day by day.",
+         page="portfolio", eyebrow="Day-by-day tracker",
+         chips=[f"📅 {start:%d %b %Y} → {end:%d %b %Y}", f"💰 {inr_short(amount)} invested",
+                "⚙️ Set amount & weights in the sidebar"])
+
+    if total_w <= 0:
+        note("Give at least one index a weight above 0%.", BAD, "⛔")
+        return
+    if abs(total_w - 100) > 0.01:
+        note(f"Weights add up to <b>{total_w:.1f}%</b>, so they are scaled to 100%.", AMBER, "⚖️")
+    weights = {a: w / total_w for a, w in raw_w.items() if w > 0}
+
+    # ---------------- Calculate ----------------
+    results, notes = {}, []
+    for a in weights:
+        res = yoy_chain(asset_dfs[a].set_index('Date')['Close'], start, end)
+        if res.empty:
+            notes.append(f"<b>{ASSET_SHORT[a]}</b>: no data in this period, its share stays as cash.")
+            continue
+        if res.index[0].date() > start:
+            notes.append(f"<b>{ASSET_SHORT[a]}</b>: data starts {res.index[0]:%d-%m-%Y}, so its money is invested "
+                         f"from that day and its base year starts there.")
+        invested = amount * weights[a]
+        res['Holding (₹)'] = invested * res['Index Value'] / res['Index Value'].iloc[0]
+        results[a] = res
+    for n in notes:
+        note(n, BLUE)
+    if not results:
+        note("No data to show for the selected dates.", AMBER, "⚠️")
+        return
+
+    all_dates = sorted(set().union(*[r.index for r in results.values()]))
+    holdings = pd.DataFrame(index=pd.DatetimeIndex(all_dates))
+    for a, res in results.items():
+        h = res['Holding (₹)'].reindex(holdings.index).ffill()
+        holdings[a] = h.fillna(amount * weights[a])          # before its data starts = cash
+    cash = amount * sum(w for a, w in weights.items() if a not in results)
+    portfolio = holdings.sum(axis=1) + cash
+
+    # ---------------- Cards ----------------
+    last_d = portfolio.index[-1]
+    cur_val = portfolio.iloc[-1]
+    pl = cur_val - amount
+    port_yoy = (cur_val / value_one_year_ago(portfolio, last_d) - 1) * 100
+    day_chg = portfolio.diff().iloc[-1] if len(portfolio) > 1 else 0.0
+
+    section("Your portfolio today",
+            f"{portfolio.index[0]:%d %b %Y} → {last_d:%d %b %Y} · {len(portfolio):,} trading days", "💼", CYAN)
+    kpi_row([
+        dict(label="Invested", value=inr(amount), delta=f"across {len(results)} indices", icon="💵", accent=BLUE),
+        dict(label="Current value", value=inr(cur_val), delta=fmt_pct(pl / amount * 100), tone=tone_of(pl),
+             icon="💎", accent=CYAN),
+        dict(label="Total P&L", value=inr(pl, sign=True), delta=f"today {inr(day_chg, sign=True)}",
+             tone=tone_of(day_chg), icon="💰", accent=EMERALD if pl >= 0 else BAD),
+        dict(label="Portfolio YoY", value=pct(port_yoy), delta="vs same day last year",
+             tone=tone_of(port_yoy), icon="🔁", accent=VIOLET),
+    ])
+
+    # Per-holding mini cards
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    cols = st.columns(len(results))
+    for col, (a, res) in zip(cols, results.items()):
+        inv = amount * weights[a]
+        cur = holdings[a].iloc[-1]
+        with col:
+            kpi(f"{ASSET_SHORT[a]} · {weights[a] * 100:.0f}%", inr(cur), fmt_pct((cur / inv - 1) * 100),
+                tone_of(cur - inv), ASSET_ICONS[a], COLORS[a])
+
+    # ---------------- Chart ----------------
+    section("Growth of each holding", "Dotted vertical lines mark each year boundary", "📈", BLUE)
+    fig = go.Figure()
+    for a in results:
+        y = holdings[a] if chart_mode == "₹ Value" else (holdings[a] / (amount * weights[a]) - 1) * 100
+        fig.add_trace(go.Scatter(x=holdings.index, y=y, name=f"{ASSET_SHORT[a]} ({weights[a] * 100:.0f}%)",
+                                 line=dict(color=COLORS[a], width=2.2)))
+    if show_total:
+        y = portfolio if chart_mode == "₹ Value" else (portfolio / amount - 1) * 100
+        fig.add_trace(go.Scatter(x=portfolio.index, y=y, name="Total portfolio",
+                                 line=dict(color=PORTFOLIO_COLOR, width=3, dash='dot')))
+    k = 1
+    while pd.Timestamp(start) + pd.DateOffset(years=k) <= last_d:
+        fig.add_vline(x=pd.Timestamp(start) + pd.DateOffset(years=k), line_dash="dot",
+                      line_color="rgba(138,148,179,0.22)")
+        k += 1
+    if chart_mode == "% Return":
+        fig.add_hline(y=0, line_dash="dash", line_color=FAINT)
+    title = "Value of each holding (₹)" if chart_mode == "₹ Value" else "Return since start (%)"
+    fig.update_layout(**PLOT_LAYOUT, title=title, height=560, hovermode='x unified',
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
+    if chart_mode == "₹ Value":
+        fig.update_yaxes(tickprefix="₹", tickformat=",.0f")
+    else:
+        fig.update_yaxes(ticksuffix="%")
     with panel():
-        cols = st.columns(len(used))
-        raw = {}
-        for col, n in zip(cols, used):
-            with col:
-                raw[n] = st.slider(f"{ASSET_ICONS[n]} {ASSET_SHORT[n]}", 0, 100, 100 // len(used), 5,
-                                   format="%d%%", key=f"mc_w_{n}")
-        total = sum(raw.values())
-        weight_badge(total)
-        if mode == "periodic":
-            f_lbl = st.radio("🔁 Rebalance every", list(REBAL_FREQ), index=3, horizontal=True, key="mc_freq")
-            every, setting_label = REBAL_FREQ[f_lbl], f" · rebalanced {f_lbl.lower()}"
-        elif mode == "diff":
-            c1, c2 = st.columns(2)
-            with c1:
-                f_lbl = st.radio("🔁 Rebalance every", list(DIFF_REBAL_FREQ), index=1, horizontal=True,
-                                 key="mc_dfreq")
-            with c2:
-                l_lbl = st.radio("🔍 Compare growth over the previous", list(LOOKBACK_OPTIONS), index=1,
-                                 horizontal=True, key="mc_look")
-            every, lookback = DIFF_REBAL_FREQ[f_lbl], LOOKBACK_OPTIONS[l_lbl]
-            setting_label = f" · {f_lbl.lower()} · look-back {l_lbl}"
-    if total <= 0:
-        note("Give at least one asset a weight above 0%.", BAD, "⛔")
-        st.stop()
-    weights = tuple(raw[n] / total for n in used)
-    mix_label = " / ".join(f"{raw[n] / total * 100:.0f}" for n in used)
+        chart(fig, key="ep_chart")
 
-    with st.spinner(f"Simulating {N_SIMS:,} futures for your mix…"):
-        path, s = _simulate_mix(rets, weights, mode, every, lookback)
-
-    # ---------------- Tabs: only the open tab is built ----------------
-    # ---------------- 4. The answer ----------------
-    section("The answer, in plain words", f"Your mix {mix_label} ({' / '.join(ASSET_SHORT[n] for n in used)})"
-            f"{setting_label}", "🗣️", ORANGE)
-    loss_n = s['prob_loss']
-    story(
-        f"If you invest {_inr(AMOUNT)} today and wait {YEARS} years…",
-        f"You will most likely end up with about <span class='big'>{_inr(s['median'])}</span>, "
-        f"that is <b>{_mult(s['median'])}</b> your money, or roughly <b>{s['cagr_median']:.1f}% a year</b>.",
-        [("😟 Bad case · 1 in 20", _inr(s['p5']), f"{_mult(s['p5'])} your money"),
-         ("🤩 Great case · 1 in 20", _inr(s['p95']), f"{_mult(s['p95'])} your money"),
-         ("🎲 Chance of losing money", f"{loss_n:.0f} in 100" if loss_n >= 1 else "Less than 1 in 100",
-          f"Typical worst fall on the way: {s['dd_median']:.0f}%")],
-        c1=STRAT_COLORS[mode], c2=STRAT_COLORS[mode])
-
-    # ---------------- 5. 100 futures ----------------
-    section("100 possible futures", "Each dot is one future. Where would your ₹1 lakh end up?", "🔮", BLUE)
-    waffle(_out_of_100(s['final']), caption=f"Out of 100 futures, after {YEARS} years you would have…")
-
-    # ---------------- 6. Charts ----------------
-    section("See it in charts", "Each chart says how to read it underneath", "📈", CYAN)
-    _outcome_tabs(path, s, color, key="mine")
+    _rolling_section(asset_dfs, results, portfolio, start, end)
 
     # ---------------- Extras behind buttons ----------------
-    section("More", "Compare every other weight split, or read how the simulation works", "🧪", EMERALD)
-    on = action_bar(toggles=[("🧪 Explore every other mix", "mc_show_mix"), ("💡 How it works & glossary", "mc_show_how")])
-    if on["mc_show_mix"]:
-        # ---------------- 7. Explore every mix ----------------
-        section("Explore every other mix", "Every weight split in 10% steps, simulated on the same futures", "🧪", EMERALD)
-        with st.spinner("Simulating every weight combination (a few seconds the first time, then saved)…"):
-            bh = _simulate_combos(rets, 'bh')
-            if mode == 'bh':
-                _combos_explorer('bh', *bh, bh_ref=None, mine=(s, mix_label))
-            elif mode == 'periodic':
-                pr = _simulate_combos(rets, 'periodic')
-                _combos_explorer('periodic', *pr, bh_ref=bh[0]['All settings'], mine=(s, mix_label))
-            else:
-                pooled, paths, combos, sets = _simulate_diff_all(rets)
-                _diff_explorer(pooled, paths, combos, sets, bh[0]['All settings'], mine=(s, mix_label))
-    if on["mc_show_how"]:
-        # ---------------- 1. How it works ----------------
-        section("How it works", "No crystal ball: just real history, reshuffled", "💡", AMBER)
-        steps([
-            ("📚", "Take real history", f"{len(rets)} real months of all {len(used)} assets "
-             f"({rets.index[0]:%b %Y} – {rets.index[-1]:%b %Y}), moving together exactly as they did.", BLUE),
-            ("🔀", "Shuffle into new futures", f"Pick random {BLOCK}-month chunks and glue them into a new {YEARS}-year "
-             f"path. Repeat {N_SIMS:,} times.", VIOLET),
-            ("⚖️", "Apply your strategy", "Run your weights and strategy on every one of those futures.", PINK),
-            ("📊", "Count the outcomes", "Line up all the endings: the typical one, the bad and great cases, "
-             "and the odds of losing money.", EMERALD),
-        ])
-        if dropped:
-            note("Skipped months with a move above ±60% (looks like a data error in the sheet): "
-                 + ", ".join(d.strftime('%b %Y') for d in dropped), AMBER, "⚠️")
+    section("Data & more", "Holding tables, year-end values and every day's numbers with CSV download", "📥", CYAN)
+    on = action_bar(toggles=[("📋 Holdings & year-end values", "ep_show_hold"),
+                             ("📅 Day-by-day table & CSV", "ep_show_data")])
+    if on["ep_show_hold"]:
+        # ---------------- Holdings summary ----------------
+        section("Holdings", "Latest YoY = change versus the same day last year", "📋", AMBER)
+        rows = []
+        for a, res in results.items():
+            inv = amount * weights[a]
+            cur = holdings[a].iloc[-1]
+            rows.append({'Index': ASSET_LABELS[a], 'Weight (%)': weights[a] * 100, 'Invested (₹)': inv,
+                         'Current Value (₹)': cur, 'P&L (₹)': cur - inv, 'Return (%)': (cur / inv - 1) * 100,
+                         'Latest YoY (%)': res['YoY (%)'].iloc[-1], 'Latest Close (₹)': res['Close'].iloc[-1]})
+        rows.append({'Index': '🧾 Total portfolio', 'Weight (%)': 100.0, 'Invested (₹)': amount,
+                     'Current Value (₹)': cur_val, 'P&L (₹)': pl, 'Return (%)': pl / amount * 100,
+                     'Latest YoY (%)': port_yoy, 'Latest Close (₹)': np.nan})
+        hold_df = pd.DataFrame(rows)
+        hold_fmt = {'Weight (%)': '{:.1f}%', 'Invested (₹)': money, 'Current Value (₹)': money,
+                    'P&L (₹)': lambda v: inr(v, 2, sign=True), 'Return (%)': pct, 'Latest YoY (%)': pct,
+                    'Latest Close (₹)': money}
+        hold_df, hold_fmt = blank_missing(hold_df, hold_fmt)
+        st.dataframe(style_change_cols(hold_df.style.format(hold_fmt), ['P&L (₹)', 'Return (%)', 'Latest YoY (%)']),
+                     width="stretch", hide_index=True)
 
-        # ---------------- 8. Glossary ----------------
-        section("What the words mean", "Plain-language glossary", "📖", MUTED)
-        glossary(GLOSSARY)
+        # ---------------- Year-end values ----------------
+        section("Year-end values", "Value of every holding at the end of each investment year", "📅", VIOLET)
+        year_no = pd.Series(0, index=holdings.index)
+        k = 1
+        while pd.Timestamp(start) + pd.DateOffset(years=k) <= last_d:
+            year_no[holdings.index >= pd.Timestamp(start) + pd.DateOffset(years=k)] = k
+            k += 1
+        ye = holdings.assign(**{'Total Portfolio': portfolio}).groupby(year_no.values).last()
+        ye.columns = [ASSET_LABELS.get(c, c) for c in ye.columns]
+        labels = []
+        for i in ye.index:
+            y_end = pd.Timestamp(start) + pd.DateOffset(years=i + 1) - pd.Timedelta(days=1)
+            labels.append(f"Year {i + 1} (to {min(y_end, last_d):%d-%m-%Y})")
 
-
-# =========================================================
-# Outcome charts for one set of futures
-# =========================================================
-def _outcome_tabs(path, s, color, key):
-    t1, t2, t3, t4 = st.tabs(["🛣️ Path over time", "🔔 Where the money ends", "📆 Yearly growth & worst falls",
-                              "📋 Percentile table"])
-    with t1:
+        fig_ye = go.Figure()
+        for a in results:
+            fig_ye.add_trace(go.Bar(x=[f"Y{i + 1}" for i in ye.index], y=ye[ASSET_LABELS[a]], name=ASSET_SHORT[a],
+                                    marker_color=COLORS[a], marker_line_width=0, hovertemplate="₹%{y:,.0f}"))
+        fig_ye.update_layout(**PLOT_LAYOUT, barmode='stack', height=340, title="Year-end value, stacked by holding",
+                             yaxis=dict(tickprefix="₹", tickformat=",.0f"), hovermode='x unified',
+                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
         with panel():
-            chart(_fan_chart(path, s, color), key=f"fan_{key}")
-        note("<b>How to read it:</b> the dark band holds the middle half of all futures, the light band 9 out of 10. "
-             "The thick line is the typical path. Thin grey lines are 20 individual futures: real markets wiggle "
-             "a lot more than the typical line.", color, "👀")
-    with t2:
-        with panel():
-            chart(_bell_chart(s['final'], AMOUNT, _inr, "Final value after 10 years (₹)", color,
-                              "Where the money ends up"), key=f"bell_{key}")
-        note("<b>How to read it:</b> the taller the bar, the more futures ended there. Red bars are the worst 1 in 20, "
-             "green bars the best 1 in 20. The long tail to the right is a few futures that did extremely well.",
-             color, "👀")
-    with t3:
-        c1, c2 = st.columns(2)
-        with c1:
-            with panel():
-                chart(_bell_chart(s['cagr'], 0.0, lambda v: f"{v:.1f}%", "Yearly growth, CAGR (%)", VIOLET,
-                                  "Yearly growth rate", height=420), key=f"cagr_{key}")
-        with c2:
-            with panel():
-                chart(_bell_chart(s['max_dd'], None, lambda v: f"{v:.1f}%", "Worst fall from a peak (%)", PINK,
-                                  "Worst fall along the way", height=420), key=f"dd_{key}")
-        note("<b>How to read it:</b> left = the steady yearly growth each future works out to. Right = the biggest "
-             "drop from a high point you'd have had to sit through. Closer to 0% is calmer.", color, "👀")
-    with t4:
-        tbl = mc.percentile_table(s, AMOUNT, YEARS)
-        st.dataframe(tbl.style.format({'Final Value (₹)': '₹{:,.0f}', 'Total Return (%)': '{:+.1f}%',
-                                       'CAGR (%)': '{:+.2f}%'}), width="stretch", hide_index=True)
-        st.caption("Read a row as: *in X% of futures, the final value was below this number*.")
+            chart(fig_ye, key="ep_ye")
+
+        ye_show = ye.apply(lambda col: col.map(money))
+        ye_show.insert(0, 'Period', labels)
+        st.dataframe(ye_show, width="stretch", hide_index=True)
+    if on["ep_show_data"]:
+        # ---------------- One combined table + CSV ----------------
+        section("All indices, day by day", "Close, previous-year close, YoY %, index value, holding and rolling return",
+                "📥", CYAN)
+        combined = pd.DataFrame(index=holdings.index)
+        for a, res in results.items():
+            lab = ASSET_SHORT[a]
+            r = res.reindex(holdings.index)
+            combined[f"{lab} Close"] = r['Close']
+            combined[f"{lab} Prev Year Close"] = r['Prev Year Close']
+            combined[f"{lab} YoY (%)"] = r['YoY (%)']
+            combined[f"{lab} Index Value"] = r['Index Value']
+            combined[f"{lab} Holding (₹)"] = holdings[a]
+        combined["Total Portfolio (₹)"] = portfolio
+        roll_label = st.session_state.get("ep_roll", list(ROLL_WINDOWS)[0])
+        roll_series, _ = _rolling_series(asset_dfs, results, portfolio, start, end, ROLL_WINDOWS[roll_label])
+        for lab, ser in roll_series.items():
+            combined[f"{lab} Rolling {roll_label} Return (%)"] = ser.reindex(holdings.index)
+        combined["Portfolio Day Change (₹)"] = portfolio.diff()
+
+        show = combined.sort_index(ascending=False)
+        show_fmt = pd.DataFrame({'Date': show.index.strftime('%d-%m-%Y')})
+        for c in show.columns:
+            f = pct if "(%)" in c else money
+            show_fmt[c] = [f(v) for v in show[c]]
+        st.dataframe(show_fmt, width="stretch", height=420, hide_index=True)
+
+        export = combined.round(4).copy()
+        export.index = export.index.strftime('%Y-%m-%d')
+        export.index.name = 'Date'
+        st.download_button("⬇️  Download all indices + portfolio (CSV)", export.to_csv().encode('utf-8-sig'),
+                           file_name=f"everyday_portfolio_{start:%Y%m%d}_{end:%Y%m%d}.csv", mime="text/csv",
+                           key="ep_dl")
 
 
-def _stat_cards(s, color):
-    def ch(v):
-        return f"{(v / AMOUNT - 1) * 100:+.0f}%"
-    kpi_row([
-        dict(label="Typical (median)", value=_inr(s['median']), delta=ch(s['median']),
-             tone="good" if s['median'] >= AMOUNT else "bad", icon="🎯", accent=color),
-        dict(label="Average (mean)", value=_inr(s['mean']), delta=ch(s['mean']),
-             tone="good" if s['mean'] >= AMOUNT else "bad", icon="📊", accent=BLUE),
-        dict(label="Bad case · 1 in 20", value=_inr(s['p5']), delta=ch(s['p5']),
-             tone="good" if s['p5'] >= AMOUNT else "bad", icon="😟", accent=BAD),
-        dict(label="Great case · 1 in 20", value=_inr(s['p95']), delta=ch(s['p95']), tone="good", icon="🤩",
-             accent=EMERALD),
-        dict(label="Chance of loss", value=f"{s['prob_loss']:.1f}%", delta=f"ends below {_inr(AMOUNT)}",
-             tone="good" if s['prob_loss'] < 10 else "bad", icon="🎲", accent=AMBER),
-    ])
+# ---------------------------------------------------------
+# Rolling returns section
+# ---------------------------------------------------------
+def _rolling_series(asset_dfs, results, portfolio, start, end, yrs):
+    """Rolling return of every index (actual prices, full history for the look-back) and of the portfolio.
+    Returns (series by name, rows removed as data errors by name)."""
+    s_ts, e_ts = pd.Timestamp(start), pd.Timestamp(end)
+    series, removed = {}, {}
+    for a in results:
+        clean, n_bad = drop_glitches(asset_dfs[a].set_index('Date')['Close'])
+        if n_bad:
+            removed[ASSET_SHORT[a]] = n_bad
+        r = rolling_return(clean, yrs)
+        series[ASSET_SHORT[a]] = r[(r.index >= s_ts) & (r.index <= e_ts)].dropna()
+    series['Portfolio'] = rolling_return(portfolio, yrs).dropna()
+    return series, removed
 
 
-# =========================================================
-# Buy & Hold / Rebalance: every weight combination
-# =========================================================
-def _combos_explorer(mode, pooled, paths, combos, combo_list, bh_ref, mine):
-    color = STRAT_COLORS[mode]
-    my_s, my_label = mine
-    names = [n for n in pooled if n != 'All settings']
-    asset_cols = [c for c in combos.columns if c.endswith(' (%)') and c.split(' (%)')[0] in ASSETS]
-    multi = len(names) > 1
+def _rolling_section(asset_dfs, results, portfolio, start, end):
+    section("Rolling returns", "The return over every window ending on each day: how often, and by how much, "
+            "each index made money", "🔁", PINK)
+    win_label = st.radio("Window", list(ROLL_WINDOWS), index=0, horizontal=True, key="ep_roll",
+                         label_visibility="collapsed")
+    yrs = ROLL_WINDOWS[win_label]
+    unit = "" if yrs == 1 else " a year"
+    series, removed = _rolling_series(asset_dfs, results, portfolio, start, end, yrs)
+    colors = {**{ASSET_SHORT[a]: COLORS[a] for a in results}, 'Portfolio': INK}
+    icons = {**{ASSET_SHORT[a]: ASSET_ICONS[a] for a in results}, 'Portfolio': '💼'}
+    shown = {k: v for k, v in series.items() if len(v)}
 
-    def label(row):
-        w = " / ".join(f"{row[c]:g}" for c in asset_cols)
-        return w + (f" · {row['Setting']}" if multi else "")
+    if not shown:
+        note(f"Not enough history yet: a {win_label.lower()} rolling return needs at least {win_label.lower()} "
+             "of data before each day.", AMBER, "⏳")
+        return {'series': {}, 'label': win_label}
 
-    tabs = ["🏆 Best mixes", "🧭 Does each asset help?"] + (["⚙️ Rebalance frequencies"] if multi else []) \
-        + ["🌐 All mixes together", "📋 Every mix (table)"]
-    tab = dict(zip(tabs, st.tabs(tabs)))
+    note(f"<b>What this shows:</b> for every day, the return you would have made if you had bought exactly "
+         f"{win_label.lower()} earlier{' (shown as a yearly average, CAGR)' if yrs > 1 else ''}. "
+         "It answers <b>“how often did a holding period like this make money?”</b> without depending on "
+         "one lucky or unlucky start date.", PINK, "💡")
 
-    with tab["🏆 Best mixes"]:
-        best_med = combos.loc[combos['Median (₹)'].idxmax()]
-        best_p5 = combos.loc[combos['Bottom 5% (₹)'].idxmax()]
-        least = combos.sort_values(['Chance of loss (%)', 'Bottom 5% (₹)'], ascending=[True, False]).iloc[0]
-        worst = combos.loc[combos['Median (₹)'].idxmin()]
-        _best_cards(best_med, best_p5, least, worst, label)
-        st.caption("Weights are in the order " + " / ".join(ASSET_SHORT[a.split(' (%)')[0]] for a in asset_cols) + ".")
+    if removed:
+        note("Ignored price rows that look like data-entry errors (more than 50% away from the surrounding prices): "
+             + ", ".join(f"<b>{k}</b> {n} row{'s' if n != 1 else ''}" for k, n in removed.items())
+             + ". Fix them in the Google Sheet to include them.", AMBER, "🧹")
 
-        hover = combos.apply(lambda r: "<br>".join(f"{ASSET_SHORT.get(c.split(' (%)')[0], c)}: {r[c]:g}%"
-                                                   for c in asset_cols) + (f"<br>{r['Setting']}" if multi else ""),
-                             axis=1)
-        fig = go.Figure(go.Scatter(
-            x=combos['Bottom 5% (₹)'], y=combos['Median (₹)'], mode='markers', name='Every mix',
-            marker=dict(color=combos['Chance of loss (%)'], colorscale=[[0, EMERALD], [0.5, ORANGE], [1, BAD]],
-                        size=9, opacity=0.85, line=dict(color='#FFFFFF', width=1),
-                        colorbar=dict(title="Chance<br>of loss", ticksuffix="%", thickness=12)),
-            customdata=np.stack([hover, combos['Chance of loss (%)'], combos['Top 5% (₹)']], axis=1),
-            hovertemplate=("%{customdata[0]}<br>Typical: ₹%{y:,.0f}<br>Bad case: ₹%{x:,.0f}"
-                           "<br>Great case: ₹%{customdata[2]:,.0f}<br>Chance of loss: %{customdata[1]:.1f}%"
-                           "<extra></extra>")))
-        fig.add_trace(go.Scatter(x=[my_s['p5']], y=[my_s['median']], mode='markers+text', name='Your mix',
-                                 marker=dict(color=PINK, size=20, symbol='diamond', line=dict(color='#fff', width=2)),
-                                 text=[f"  Your mix {my_label}"], textposition='middle right',
-                                 textfont=dict(color=PINK, size=13), hoverinfo='skip'))
-        for row, txt in ((best_med, "Best typical"), (best_p5, "Safest")):
-            fig.add_trace(go.Scatter(x=[row['Bottom 5% (₹)']], y=[row['Median (₹)']], mode='markers+text',
-                                     marker=dict(color=INK, size=16, symbol='star', line=dict(color='#FFFFFF', width=1)),
-                                     text=[f"{txt}: {label(row)}  "], textposition='middle left',
-                                     textfont=dict(color=INK, size=11), hoverinfo='skip', showlegend=False))
-        fig.add_vline(x=AMOUNT, line_dash='dot', line_color=FAINT, annotation_text="Bad case = money back",
-                      annotation_position='top left', annotation_font_color=MUTED)
-        fig.update_layout(**PLOT_LAYOUT, height=560, showlegend=False, hovermode='closest',
-                          title="Typical result vs bad case for every mix (top-right is best)",
-                          xaxis=dict(title="Bad case (1 in 20) → safer to the right", tickprefix="₹", tickformat=',.0f'),
-                          yaxis=dict(title="Typical result → better upward", tickprefix="₹", tickformat=',.0f'))
-        with panel():
-            chart(fig, key=f"scatter_{mode}")
-        note("<b>How to read it:</b> every dot is one way to split your money. Higher = better typical result, "
-             "further right = less painful bad case. Green dots almost never lose money. The pink diamond is your mix.",
-             color, "👀")
+    # cards: latest value per index, with the history as a sparkline
+    cards = []
+    for k, v in shown.items():
+        pos_share = (v > 0).mean() * 100
+        cards.append(dict(label=k, value=f"{v.iloc[-1]:+.1f}%{unit}",
+                          delta=f"avg {v.mean():+.1f}% · {pos_share:.0f}% up",
+                          tone="good" if v.iloc[-1] >= 0 else "bad", icon=icons[k], accent=VIOLET if k == 'Portfolio' else colors[k],
+                          spark=v.to_numpy()))
+    kpi_row(cards)
 
-    with tab["🧭 Does each asset help?"]:
-        fig2 = go.Figure()
-        for a_col in asset_cols:
-            asset = a_col.split(' (%)')[0]
-            g = combos.groupby(a_col)['Median (₹)'].mean()
-            g = g[g.index.isin(range(0, 101, WEIGHT_STEP))]
-            fig2.add_trace(go.Scatter(x=g.index, y=g.values, mode='lines+markers', name=ASSET_SHORT[asset],
-                                      line=dict(color=COLORS[asset], width=3), marker=dict(size=9),
-                                      hovertemplate=f"{ASSET_SHORT[asset]} at %{{x}}%: ₹%{{y:,.0f}}<extra></extra>"))
-        fig2.update_layout(**PLOT_LAYOUT, height=440, hovermode='x unified',
-                           title="Typical result as you give each asset more weight",
-                           xaxis=dict(title="Weight of the asset (%)", ticksuffix="%", dtick=10),
-                           yaxis=dict(title="Typical final value (₹)", tickprefix="₹", tickformat=',.0f'),
-                           legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
-        with panel():
-            chart(fig2, key=f"effect_{mode}")
-        note("<b>How to read it:</b> a line going UP means adding more of that asset raised the typical result "
-             "(averaged over every way of splitting the rest). A line going DOWN means more of it hurt.", color, "👀")
-
-    if multi:
-        with tab["⚙️ Rebalance frequencies"]:
-            _settings_compared(mode, {n: (paths[n], pooled[n]) for n in names}, bh_ref,
-                               bh_label="Buy & Hold (reference)")
-            pick = st.selectbox("Open the full picture for one frequency", names, key=f"one_{mode}")
-            _stat_cards(pooled[pick], color)
-            _outcome_tabs(paths[pick], pooled[pick], color, key=f"{mode}_one")
-
-    with tab["🌐 All mixes together"]:
-        st.caption(f"All {len(combo_list)} weight mixes{' × ' + str(len(names)) + ' frequencies' if multi else ''} "
-                   "pooled into one big set of futures.")
-        _stat_cards(pooled['All settings'], color)
-        _outcome_tabs(paths['All settings'], pooled['All settings'], color, key=f"{mode}_all")
-
-    with tab["📋 Every mix (table)"]:
-        tbl = combos.sort_values('Median (₹)', ascending=False).reset_index(drop=True)
-        if not multi:
-            tbl = tbl.drop(columns=['Setting'])
-        money = [c for c in tbl.columns if '(₹)' in c]
-        pct_cols = [c for c in tbl.columns if '(%)' in c and c not in asset_cols]
-        st.dataframe(tbl.style.format({**{c: '₹{:,.0f}' for c in money}, **{c: '{:.2f}%' for c in pct_cols},
-                                       **{c: '{:g}%' for c in asset_cols}}),
-                     width="stretch", hide_index=True, height=440)
-
-
-def _best_cards(best_med, best_p5, least, worst, label):
-    kpi_row([
-        dict(label="Best typical result", value=_inr(best_med['Median (₹)']), delta=label(best_med),
-             icon="🏆", accent=EMERALD),
-        dict(label="Safest bad case", value=_inr(best_p5['Bottom 5% (₹)']), delta=label(best_p5),
-             icon="🛡️", accent=CYAN),
-        dict(label="Lowest chance of loss", value=f"{least['Chance of loss (%)']:.1f}%", delta=label(least),
-             icon="🎯", accent=VIOLET),
-        dict(label="Worst typical result", value=_inr(worst['Median (₹)']), delta=label(worst), tone="bad",
-             icon="⚠️", accent=BAD),
-    ])
-
-
-# =========================================================
-# Different Weights: every weight set x every setting
-# =========================================================
-def _diff_explorer(pooled, paths, combos, sets, bh, mine):
-    color = STRAT_COLORS['diff']
-    names = [n for n in pooled if n != 'All settings']
-    t_best, t_heat, t_set, t_all, t_tbl = st.tabs(["🏆 Best weight sets", "🗺️ Heatmap", "⚙️ The 6 settings",
-                                                   "🌐 All together", "📋 Every combination"])
-    with t_best:
-        best_med = combos.loc[combos['Median (₹)'].idxmax()]
-        best_p5 = combos.loc[combos['Bottom 5% (₹)'].idxmax()]
-        least = combos.sort_values(['Chance of loss (%)', 'Bottom 5% (₹)'], ascending=[True, False]).iloc[0]
-        worst = combos.loc[combos['Median (₹)'].idxmin()]
-        _best_cards(best_med, best_p5, least, worst, lambda r: f"{r['Weights']} · {r['Setting']}")
-        st.caption("Weights are written biggest first: on every rebalance the biggest goes to the asset that grew "
-                   "the least, the smallest to the one that grew the most.")
-
-    with t_heat:
-        piv = combos.pivot(index='Weights', columns='Setting', values='Median (₹)')
-        order = [" / ".join(f"{x:g}" for x in ws) for ws in sets]
-        piv = piv.reindex(index=order, columns=names)
-        p5 = combos.pivot(index='Weights', columns='Setting', values='Bottom 5% (₹)').reindex(index=order,
-                                                                                            columns=names)
-        loss = combos.pivot(index='Weights', columns='Setting', values='Chance of loss (%)').reindex(index=order,
-                                                                                                  columns=names)
-        fig = go.Figure(go.Heatmap(
-            z=piv.to_numpy(), x=[n.replace(' · ', '<br>') for n in names], y=order,
-            colorscale=[[0, '#EEF2FF'], [0.4, '#C7D2FE'], [0.75, '#818CF8'], [1, '#3730A3']], xgap=3, ygap=3,
-            text=[[_inr(v) for v in row] for row in piv.to_numpy()], texttemplate="%{text}",
-            textfont=dict(size=11), customdata=np.dstack([p5.to_numpy(), loss.to_numpy()]),
-            colorbar=dict(title="Typical", tickprefix="₹", tickformat=',.0f', thickness=12),
-            hovertemplate=("Weights %{y}<br>%{x}<br>Typical: ₹%{z:,.0f}<br>Bad case: ₹%{customdata[0]:,.0f}"
-                           "<br>Chance of loss: %{customdata[1]:.1f}%<extra></extra>")))
-        fig.update_layout(**PLOT_LAYOUT, height=170 + 30 * len(order),
-                          title=dict(text="Typical final value for every weight set × setting", y=0.99),
-                          xaxis=dict(side='top'), yaxis=dict(autorange='reversed', title="Weights (biggest first)"))
-        fig.update_layout(margin=dict(l=12, r=12, t=130, b=12))
-        with panel():
-            chart(fig, key="diff_heat")
-        note("<b>How to read it:</b> warmer / brighter cells = a better typical result. Each row is a set of weights, "
-             "each column a rebalance setting. Hover any cell for its bad case and chance of loss.", color, "👀")
-
-    with t_set:
-        _settings_compared('diff', {n: (paths[n], pooled[n]) for n in names}, bh, bh_label="Buy & Hold (reference)")
-        pick = st.selectbox("Open the full picture for one setting", names, key="one_diff")
-        _stat_cards(pooled[pick], color)
-        _outcome_tabs(paths[pick], pooled[pick], color, key="diff_one")
-
-    with t_all:
-        st.caption(f"All {len(sets)} weight sets × {len(names)} settings pooled into one big set of futures.")
-        _stat_cards(pooled['All settings'], color)
-        _outcome_tabs(paths['All settings'], pooled['All settings'], color, key="diff_all")
-
-    with t_tbl:
-        tbl = combos.sort_values('Median (₹)', ascending=False).reset_index(drop=True)
-        money = [c for c in tbl.columns if '(₹)' in c]
-        pct_cols = [c for c in tbl.columns if '(%)' in c]
-        st.dataframe(tbl.style.format({**{c: '₹{:,.0f}' for c in money}, **{c: '{:.2f}%' for c in pct_cols}}),
-                     width="stretch", hide_index=True, height=440)
-
-
-# =========================================================
-# Settings compared (range chart + table)
-# =========================================================
-def _settings_compared(mode, variants, bh, bh_label):
-    color = STRAT_COLORS[mode]
-    names = list(variants.keys())
-    stats = {n: variants[n][1] for n in names}
-
-    rows = [(bh_label, bh, FAINT)] + [(n, stats[n], color) for n in names]
-    rows = rows[::-1]
-    labels = [r[0] for r in rows]
+    # line chart
     fig = go.Figure()
-    notes = []
-    for lbl, s, col in rows:
-        p25, p75 = np.percentile(s['final'], [25, 75])
-        fig.add_trace(go.Scatter(x=[s['p5'], s['p95']], y=[lbl, lbl], mode='lines',
-                                 line=dict(color=hex_rgba(col, 0.45), width=4), showlegend=False, hoverinfo='skip'))
-        fig.add_trace(go.Scatter(x=[p25, p75], y=[lbl, lbl], mode='lines',
-                                 line=dict(color=col, width=18), showlegend=False, hoverinfo='skip'))
-        fig.add_trace(go.Scatter(
-            x=[s['median']], y=[lbl], mode='markers', showlegend=False,
-            marker=dict(color=INK, size=13, line=dict(color='#FFFFFF', width=2.5)),
-            hovertemplate=(f"<b>{lbl}</b><br>Bad case: {_inr(s['p5'])}<br>Middle half: {_inr(p25)} – {_inr(p75)}"
-                           f"<br>Typical: {_inr(s['median'])}<br>Average: {_inr(s['mean'])}"
-                           f"<br>Great case: {_inr(s['p95'])}<br>Chance of loss: {s['prob_loss']:.1f}%<extra></extra>")))
-        notes += [dict(x=s['p5'], y=lbl, text=_inr(s['p5']), showarrow=False, xanchor='right', xshift=-6,
-                       font=dict(color=BAD, size=11)),
-                  dict(x=s['p95'], y=lbl, text=_inr(s['p95']), showarrow=False, xanchor='left', xshift=6,
-                       font=dict(color=GOOD, size=11))]
-    lo = min(r[1]['p5'] for r in rows)
-    hi = max(r[1]['p95'] for r in rows)
-    pad = (hi - lo) * 0.12
-    fig.update_layout(**PLOT_LAYOUT, annotations=notes, height=130 + 56 * len(rows), hovermode='closest',
-                      title="Range of outcomes for every setting",
-                      xaxis=dict(title="Final value (₹)", tickprefix="₹", tickformat=',.0f',
-                                 range=[max(0, lo - pad), hi + pad]),
-                      yaxis=dict(categoryorder='array', categoryarray=labels))
-    fig.add_vline(x=AMOUNT, line_dash='dot', line_color=FAINT, annotation_text=f"Invested {_inr(AMOUNT)}",
-                  annotation_position='top', annotation_font_color=MUTED)
+    for k, v in shown.items():
+        is_p = k == 'Portfolio'
+        fig.add_trace(go.Scatter(x=v.index, y=v.values, name=k,
+                                 line=dict(color=colors[k], width=3 if is_p else 1.8, dash='dot' if is_p else 'solid'),
+                                 hovertemplate="%{y:+.1f}%"))
+    lo = min(v.min() for v in shown.values())
+    if lo < 0:
+        fig.add_hrect(y0=lo * 1.1, y1=0, fillcolor=hex_rgba(BAD, 0.05), line_width=0)
+    fig.add_hline(y=0, line_color=FAINT, line_width=1.5)
+    fig.update_layout(**PLOT_LAYOUT, height=500, hovermode='x unified',
+                      title=f"Rolling {win_label.lower()} return (%{unit})",
+                      yaxis=dict(ticksuffix="%"),
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
     with panel():
-        chart(fig, key=f"range_{mode}")
-    note("<b>How to read it:</b> each row is one setting. Thin line = bad case to great case (9 in 10 futures), "
-         "thick bar = the middle half, white dot = typical result. The grey row is Buy & Hold for reference.",
-         color, "👀")
+        chart(fig, key="ep_roll_chart")
 
-    trs = [{'Setting': n, 'Typical (₹)': s['median'], 'Average (₹)': s['mean'], 'Bad case (₹)': s['p5'],
-            'Great case (₹)': s['p95'], 'Chance of loss (%)': s['prob_loss'], 'Chance to double (%)': s['prob_double'],
-            'Typical CAGR (%)': s['cagr_median'], 'Typical worst fall (%)': s['dd_median']}
-           for n, s in list(stats.items()) + [(bh_label, bh)]]
-    df = pd.DataFrame(trs)
-    money = [c for c in df.columns if '(₹)' in c]
-    pct_cols = [c for c in df.columns if '(%)' in c]
-    st.dataframe(df.style.format({**{c: '₹{:,.0f}' for c in money}, **{c: '{:.2f}%' for c in pct_cols}}),
-                 width="stretch", hide_index=True)
-
-
-# =========================================================
-# Charts
-# =========================================================
-def _bell_chart(data, ref, fmt, x_title, color, title, height=480):
-    data = np.asarray(data, dtype=float)
-    lo, hi = np.percentile(data, [0.5, 99.5])
-    if hi <= lo:
-        hi = lo + 1e-9
-    shown = data[(data >= lo) & (data <= hi)]
-    p5, p50, p95, mean = np.percentile(data, 5), np.median(data), np.percentile(data, 95), data.mean()
-
-    counts, edges = np.histogram(shown, bins=60)
-    mids = (edges[:-1] + edges[1:]) / 2
-    pct_ = counts / len(data) * 100
-    bar_colors = [hex_rgba(BAD, 0.85) if m < p5 else hex_rgba(GOOD, 0.85) if m > p95 else hex_rgba(color, 0.7)
-                  for m in mids]
-    hover = [f"{fmt(a)} to {fmt(b)}<br>{c:,} futures ({p:.1f}%)"
-             for a, b, c, p in zip(edges[:-1], edges[1:], counts, pct_)]
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=mids, y=pct_, width=(edges[1] - edges[0]) * 0.88, marker_color=bar_colors,
-                         marker_line_width=0, hovertext=hover, hoverinfo="text", showlegend=False))
-    grid = np.linspace(lo, hi, 300)
-    dens = _kde(shown, grid) * (edges[1] - edges[0]) * 100 * len(shown) / len(data)
-    fig.add_trace(go.Scatter(x=grid, y=dens, mode='lines', line=dict(color=INK, width=2.2),
-                             hoverinfo='skip', showlegend=False))
-
-    ymax = max(pct_.max(), dens.max()) * 1.08
-    marks = [(p5, "Bad case", BAD, 'dash'), (p50, "Typical", INK, 'solid'),
-             (mean, "Average", BLUE, 'dot'), (p95, "Great case", GOOD, 'dash')]
-    if ref is not None and lo <= ref <= hi:
-        marks.append((ref, "Invested" if ref else "0%", MUTED, 'dot'))
-    shapes, notes = [], []
-    for i, (x, label, col, dash) in enumerate(sorted(marks, key=lambda m: m[0])):
-        level = i % 3
-        shapes.append(dict(type='line', x0=x, x1=x, y0=0, y1=1.0 + level * 0.11, yref='paper',
-                           line=dict(color=col, width=2, dash=dash)))
-        notes.append(dict(x=x, y=1.0 + level * 0.11, yref='paper', yanchor='bottom',
-                          text=f"<b>{label}</b> {fmt(x)}", showarrow=False, font=dict(color=TEXT, size=11),
-                          bgcolor='#FFFFFF', bordercolor=col, borderwidth=1.5, borderpad=4))
-    x_fmt = {'tickprefix': '₹', 'tickformat': ',.0f'} if '₹' in x_title else {'ticksuffix': '%'}
-    fig.update_layout(**PLOT_LAYOUT, height=height, bargap=0, hovermode='closest', shapes=shapes, annotations=notes,
-                      title=dict(text=title, y=0.98),
-                      xaxis=dict(title=x_title, **x_fmt),
-                      yaxis=dict(title="% of futures", ticksuffix="%", range=[0, ymax]))
-    fig.update_layout(margin=dict(l=12, r=12, t=120, b=12))
-    return fig
-
-
-def _fan_chart(path, s, color):
-    x = np.arange(path.shape[1]) / 12
-    fan = s['fan']
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=fan[95], line=dict(width=0), hoverinfo='skip', showlegend=False))
-    fig.add_trace(go.Scatter(x=x, y=fan[5], fill='tonexty', fillcolor=hex_rgba(color, 0.14), line=dict(width=0),
-                             name='9 in 10 futures', hoverinfo='skip'))
-    fig.add_trace(go.Scatter(x=x, y=fan[75], line=dict(width=0), hoverinfo='skip', showlegend=False))
-    fig.add_trace(go.Scatter(x=x, y=fan[25], fill='tonexty', fillcolor=hex_rgba(color, 0.32), line=dict(width=0),
-                             name='Middle half of futures', hoverinfo='skip'))
-    sample = np.random.default_rng(1).choice(path.shape[0], min(20, path.shape[0]), replace=False)
-    xs = np.concatenate([np.append(x, np.nan) for _ in sample])
-    ys = np.concatenate([np.append(path[i], np.nan) for i in sample])
-    fig.add_trace(go.Scatter(x=xs, y=ys, mode='lines', line=dict(color='rgba(200,210,235,0.16)', width=1),
-                             hoverinfo='skip', name='Sample futures', connectgaps=False))
-    for p, nm, col, dash, w in ((95, 'Great case', GOOD, 'dash', 2), (50, 'Typical', INK, 'solid', 3.2),
-                                (5, 'Bad case', BAD, 'dash', 2)):
-        fig.add_trace(go.Scatter(x=x, y=fan[p], mode='lines', line=dict(color=col, width=w, dash=dash), name=nm,
-                                 hovertemplate=f"{nm}<br>Year %{{x:.1f}}: ₹%{{y:,.0f}}<extra></extra>"))
-    fig.add_hline(y=AMOUNT, line_dash='dot', line_color=FAINT,
-                  annotation_text=f"Invested {_inr(AMOUNT)}", annotation_position='top left',
-                  annotation_font_color=MUTED)
-    fig.update_layout(**PLOT_LAYOUT, height=480, hovermode='x unified',
-                      title=f"Your money over {YEARS} years: the range of futures",
-                      xaxis=dict(title="Years from today"),
-                      yaxis=dict(title="Portfolio value (₹)", tickprefix="₹", tickformat=',.0f',
-                                 range=[0, float(fan[95].max()) * 1.15]),
-                      legend=dict(orientation='h', yanchor='top', y=-0.18, x=0))
-    return fig
+    c1, c2 = st.columns([1, 1.25])
+    with c1:
+        box = go.Figure()
+        for k, v in shown.items():
+            box.add_trace(go.Box(x=v.values, name=k, marker_color=colors[k], boxmean=True, orientation='h',
+                                 line=dict(width=1.6), fillcolor=hex_rgba(colors[k] if k != 'Portfolio' else MUTED, 0.25),
+                                 boxpoints=False, hovertemplate="%{x:+.1f}%<extra>" + k + "</extra>"))
+        box.add_vline(x=0, line_color=FAINT)
+        box.update_layout(**PLOT_LAYOUT, height=380, showlegend=False, title="Range of rolling returns",
+                          xaxis=dict(ticksuffix="%"), yaxis=dict(autorange='reversed'))
+        with panel():
+            chart(box, key="ep_roll_box")
+        st.caption("Box = middle half of all windows · line = median · dashed = average · whiskers = typical extremes.")
+    with c2:
+        rows = []
+        for k, v in shown.items():
+            rows.append({'Index': f"{icons[k]} {k}", 'Latest (%)': v.iloc[-1], 'Average (%)': v.mean(),
+                         'Median (%)': v.median(), 'Best (%)': v.max(), 'Best window ends': v.idxmax().strftime('%d-%m-%Y'),
+                         'Worst (%)': v.min(), 'Worst window ends': v.idxmin().strftime('%d-%m-%Y'),
+                         'Positive (% of windows)': (v > 0).mean() * 100,
+                         'Above 10% (% of windows)': (v > 10).mean() * 100})
+        tbl = pd.DataFrame(rows)
+        num = [c for c in tbl.columns if '(%)' in c]
+        st.dataframe(style_change_cols(tbl.style.format({c: '{:+.2f}%' for c in num if 'windows' not in c}
+                                                        | {c: '{:.1f}%' for c in num if 'windows' in c}),
+                                       ['Latest (%)', 'Average (%)', 'Median (%)', 'Best (%)', 'Worst (%)']),
+                     width="stretch", hide_index=True)
+        st.caption(f"Index rows use actual prices; the portfolio row uses your portfolio's value. "
+                   f"{sum(len(v) for v in shown.values()):,} windows in total.")
+    return {'series': series, 'label': win_label}
