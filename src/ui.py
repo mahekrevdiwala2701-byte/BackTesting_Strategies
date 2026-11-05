@@ -60,7 +60,7 @@ GOOD_BG = "#E8F7EE"
 BAD_BG = "#FDECEC"
 
 # Banner colours (the same on every page, so the app feels like one product)
-GRADIENTS = {k: (NAVY, NAVY_2) for k in ("home", "dashboard", "invest", "montecarlo", "portfolio")}
+GRADIENTS = {k: (NAVY, NAVY_2) for k in ("home", "invest", "montecarlo", "portfolio")}
 
 # One colour per strategy (same on the Investment and Monte Carlo pages)
 STRAT_COLORS = {"bh": CYAN, "periodic": VIOLET, "diff": ORANGE}
@@ -68,7 +68,6 @@ STRAT_COLORS = {"bh": CYAN, "periodic": VIOLET, "diff": ORANGE}
 # Navigation: key -> (icon, label, colour)
 PAGES = {
     "home": ("🏠", "Main Dashboard", ACCENT),
-    "dashboard": ("📊", "Market Overview", ACCENT),
     "invest": ("💰", "Calculated Investment", ACCENT),
     "montecarlo": ("🎲", "Monte Carlo", ACCENT),
     "portfolio": ("💼", "Everyday Portfolio", ACCENT),
@@ -445,7 +444,7 @@ def sparkline_svg(values, color, cls="kpi-spark", w=200, h=46):
             f'stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>')
 
 
-def hero(title: str, subtitle: str = "", page: str = "dashboard", eyebrow: str = "", chips=None, line=None):
+def hero(title: str, subtitle: str = "", page: str = "home", eyebrow: str = "", chips=None, line=None):
     """Page banner (navy → indigo): big title, one line of explanation, the portfolio's own line on
     the right (only when there is real data for it) and a row of read-outs underneath."""
     g1, g2 = GRADIENTS.get(page, (NAVY, NAVY_2))

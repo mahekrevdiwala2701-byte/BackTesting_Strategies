@@ -17,7 +17,6 @@ st.set_page_config(
 from src.ui import apply_custom_css, hero, note, BAD  # noqa: E402  (after set_page_config)
 from src.asset_data import load_all_assets  # noqa: E402
 from src.home_page import render_home_page  # noqa: E402
-from src.dashboard_page import render_dashboard_page  # noqa: E402
 from src.investment_page import render_investment_page  # noqa: E402
 from src.monte_carlo_page import render_monte_carlo_page  # noqa: E402
 from src.everyday_portfolio_page import render_everyday_portfolio_page  # noqa: E402
@@ -31,7 +30,7 @@ st.session_state["_panel_n"] = 0      # panel() numbering starts fresh every run
 asset_dfs, fetch_errors = load_all_assets()
 
 if not asset_dfs:
-    hero("Multi-Asset Lab", "No data could be loaded.", page="dashboard", eyebrow="Data error")
+    hero("Multi-Asset Lab", "No data could be loaded.", page="home", eyebrow="Data error")
     note("Unable to load a dataset for any asset. Check that the Google Sheets are shared as "
          "<b>Anyone with the link can view</b>, or place the CSV files next to <b>app.py</b>.", BAD, "⛔")
     for name, err in fetch_errors.items():
@@ -43,7 +42,6 @@ if not asset_dfs:
 # ---------------------------------------------------------
 PAGES = {
     "home": render_home_page,              # 🏠 Main Dashboard (landing page)
-    "dashboard": render_dashboard_page,    # 📊 Market Overview (the old main dashboard)
     "invest": render_investment_page,
     "montecarlo": render_monte_carlo_page,
     "portfolio": render_everyday_portfolio_page,
