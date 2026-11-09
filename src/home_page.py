@@ -33,10 +33,10 @@ from src.alpha import (calculated_investment_values, benchmark_close, period_alp
                        FREQUENCIES as ALPHA_FREQS)
 from src.strategies import STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS
 from src.drawdown import underwater, drawdown_periods, drawdown_summary
-from src.tearsheet import metrics as ts_metrics, monthly_table, LAYOUT as TS_LAYOUT, fmt as ts_fmt
 
 DEFAULT_START = date(2010, 1, 1)
 PORT_COLOR = INDIGO        # cards about the whole portfolio (charts draw it as the white PORTFOLIO line)
+
 
 
 # =========================================================
@@ -72,6 +72,15 @@ _NO_ANIMATION_CSS = """<style>
 [data-testid="stPlotlyChart"], [class*="st-key-panel_"], [data-testid="stVerticalBlockBorderWrapper"] {
   animation: none !important; transform: none !important;
 }
+/* View switcher: one even row of buttons across the page, wraps on small screens */
+.st-key-home_view_bar { margin: 1.4rem 0 .2rem 0; padding: 6px; border-radius: 14px;
+  background: #FFFFFF; border: 1px solid #E2E7F0; box-shadow: 0 1px 2px rgba(15,27,61,.04); }
+.st-key-home_view, .st-key-home_view_bar [data-testid="stButtonGroup"] { width: 100% !important; }
+.st-key-home_view_bar [role="radiogroup"] { display: flex !important; flex-wrap: wrap; gap: 4px; width: 100% !important; }
+.st-key-home_view_bar [role="radiogroup"] > button { flex: 1 1 140px !important; max-width: none !important;
+  justify-content: center; font-weight: 600; border-radius: 10px !important; }
+.st-key-home_view_bar [role="radiogroup"] > button * { max-width: none !important; overflow: visible !important;
+  text-overflow: clip !important; white-space: nowrap !important; }
 </style>"""
 
 
@@ -131,6 +140,15 @@ def _cached_drawdown(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m
 # =========================================================
 # Page
 # =========================================================
+VIEWS = {                       # key -> (button label, section title, subtitle, icon, colour)
+    "spread":   ("🔔 Return spread",  "Return spread",  "How often each return happened", "🔔", PINK),
+    "timeline": ("📈 Return timeline", "Return timeline", "Return for every investment date", "📈", VIOLET),
+    "drawdown": ("🌊 Drawdown",       "Drawdown (underwater plot)",
+                 "How far below its previous high the portfolio was, every day", "🌊", BLUE),
+    "alpha":    ("🎯 Alpha",          "Alpha", "How much the portfolio beat the benchmark each period", "🎯", AMBER),
+    "yearly":   ("🗓️ Year by year",   "Year by year", "Average, best and worst return per investment year", "🗓️", AMBER),
+    "data":     ("📥 Data",           "Data & more", "Download everything, the full table, each asset", "📥", CYAN),
+}
 def render_home_page(asset_dfs, fetch_errors):
     available = [a for a in ASSETS if a in asset_dfs]
 
@@ -221,13 +239,28 @@ def render_home_page(asset_dfs, fetch_errors):
     # ---------------- Headline (always visible) ----------------
     _headline(stats, table, amount, w_norm, years)
 
-    # ---------------- Tearsheet: charts in sequence (left) + key metrics (right) ----------------
-    settings = (w_norm, amount, from_date, to_date, strat['mode'], strat['freq_m'], strat['look_m'], strat['bench'])
-    _tearsheet(asset_dfs, settings, strat, table, stats, years)
+    # ---------------- One view at a time ----------------
+    start_value("home_view", "spread", list(VIEWS))
+    with st.container(key="home_view_bar"):
+        view = st.segmented_control("Show", list(VIEWS), format_func=lambda k: VIEWS[k][0],
+                                    key="home_view", label_visibility="collapsed",
+                                    width="stretch") or "spread"
+    _, title, sub, icon, color = VIEWS[view]
+    section(title, sub, icon, color)
 
-    # ---------------- Tables & downloads (full width) ----------------
-    section("Details & downloads", "Drawdown periods, alpha table, full data and each asset on its own", "📥", CYAN)
-    _details(asset_dfs, settings, strat, table, years, w_norm, from_date, to_date, trading_only)
+    settings = (w_norm, amount, from_date, to_date, strat['mode'], strat['freq_m'], strat['look_m'], strat['bench'])
+    if view == "spread":
+        _bell_tab(table, stats, years)
+    elif view == "timeline":
+        _line_tab(table, years)
+    elif view == "drawdown":
+        _drawdown_tab(asset_dfs, settings, strat)
+    elif view == "alpha":
+        _alpha_tab(asset_dfs, settings, strat)
+    elif view == "yearly":
+        _yearly_tab(table)
+    else:
+        _data_tab(table, years, asset_dfs, w_norm, from_date, to_date, trading_only)
 
 
 def _strategy_sidebar(avail):
@@ -339,7 +372,7 @@ def _bell_figure(r, mean, std, color, title, height=480):
 
     fig = go.Figure()
     fig.add_vrect(x0=mean - std, x1=mean + std, fillcolor=hex_rgba(VIOLET, 0.10), line_width=0,
-                  annotation_text="±1σ", annotation_position="bottom",
+                  annotation_text="±1σ", annotation_position="top",
                   annotation_font=dict(color=MUTED, size=11))
     fig.add_trace(go.Bar(
         x=centers, y=density, width=width * 0.92, marker_color=[GOOD if c > 0 else BAD for c in centers],
@@ -352,10 +385,10 @@ def _bell_figure(r, mean, std, color, title, height=480):
     fig.add_trace(go.Scatter(x=x, y=y, mode='lines', name="Normal (bell) curve",
                              line=dict(color=INK, width=2.6), hoverinfo='skip'))
     fig.add_vline(x=0, line_color=FAINT, line_dash="dot",
-                  annotation_text="0%", annotation_position="top left",
+                  annotation_text="0% (break-even)", annotation_position="top right",
                   annotation_font=dict(color=MUTED, size=11))
     fig.add_vline(x=mean, line_color=color, line_width=2,
-                  annotation_text=f"mean {mean:+.1f}%", annotation_position="top right",
+                  annotation_text=f"mean {mean:+.1f}%", annotation_position="bottom right",
                   annotation_font=dict(color=color, size=12))
     fig.update_layout(**PLOT_LAYOUT, title=title, height=height, bargap=0,
                       xaxis=dict(title="Return (%)", ticksuffix="%"), yaxis=dict(title="Density"),
@@ -363,7 +396,85 @@ def _bell_figure(r, mean, std, color, title, height=480):
     return fig
 
 
-CHART_H = 360          # one height for every chart in the tearsheet
+CHART_H = 400          # one height for every chart so a tab fits on one screen
+
+
+def _bell_tab(table, s, years):
+    r = table['Return (%)']
+    within1 = ((r >= s['mean'] - s['std']) & (r <= s['mean'] + s['std'])).mean() * 100
+    c1, c2 = st.columns([3, 1], vertical_alignment="center")
+    with c1, panel():
+        fig = _bell_figure(r, s['mean'], s['std'], PORTFOLIO,
+                           f"Total portfolio: {_yrs(years)} same-date returns", height=CHART_H)
+        _chart(fig, key="yoy_bell")
+    with c2:
+        _mini_stats([
+            ("Positive", f"{s['pct_positive']:.1f}%", GOOD),
+            ("Negative", f"{100 - s['pct_positive']:.1f}%", BAD),
+            ("Mean", pct(s['mean']), PORTFOLIO),
+            ("Median", pct(s['median']), PORTFOLIO),
+            ("Within ±1σ", f"{within1:.0f}%  (bell = 68%)", MUTED),
+            ("±1σ range", f"{s['mean'] - s['std']:+.1f}% to {s['mean'] + s['std']:+.1f}%", MUTED),
+        ])
+    st.caption("Green bars = positive returns, red = negative. White line = normal (bell) curve with the same "
+               "mean and spread.")
+
+
+def _mini_stats(rows):
+    """Compact stat list beside a chart. rows: (label, value, colour)."""
+    html = "".join(
+        f'<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 0;'
+        f'border-bottom:1px solid rgba(138,148,179,.15)"><span style="color:{MUTED};font-size:.85rem">{lbl}</span>'
+        f'<b style="color:{c};font-size:.95rem;text-align:right">{val}</b></div>' for lbl, val, c in rows)
+    st.markdown(f'<div style="padding:4px 2px">{html}</div>', unsafe_allow_html=True)
+
+
+# =========================================================
+# Line curve
+# =========================================================
+def _line_tab(table, years):
+    c1, c2 = st.columns([1, 1], vertical_alignment="center")
+    with c1:
+        x_choice = st.radio("X-axis date", ["Investment date", "Compare date"], horizontal=True,
+                            key="yoy_line_x", label_visibility="collapsed")
+    with c2:
+        start_value("yoy_line_smooth", True)
+        smooth = st.toggle("Add 30-day average line", key="yoy_line_smooth")
+    xcol = 'Invest Date' if x_choice == "Investment date" else 'Compare Date'
+    xs = table[xcol].dt.strftime('%Y-%m-%d')               # short date text = much smaller page than full timestamps
+
+    t = table
+    r = t['Return (%)'].round(2)                          # 2 decimals is all the chart shows (smaller page)
+    custom = np.stack([t['Invest Date'].dt.strftime('%d-%m-%Y'), t['Compare Date'].dt.strftime('%d-%m-%Y'),
+                       t['Invest Value (₹)'].round(0), t['Compare Value (₹)'].round(0)], axis=1)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=xs, y=r.clip(lower=0), mode='lines', line=dict(width=0),
+                             fill='tozeroy', fillcolor=hex_rgba(GOOD, 0.22), hoverinfo='skip', showlegend=False))
+    fig.add_trace(go.Scatter(x=xs, y=r.clip(upper=0), mode='lines', line=dict(width=0),
+                             fill='tozeroy', fillcolor=hex_rgba(BAD, 0.25), hoverinfo='skip', showlegend=False))
+    fig.add_trace(go.Scatter(
+        x=xs, y=r, mode='lines', name=f"Portfolio {_yrs(years)} return",
+        line=dict(color=PORTFOLIO, width=1.6), customdata=custom,
+        hovertemplate="Invest %{customdata[0]}: ₹%{customdata[2]:,.0f}<br>"
+                      "Value on %{customdata[1]}: ₹%{customdata[3]:,.0f}<br>"
+                      "<b>%{y:+.2f}%</b><extra></extra>"))
+    if smooth and len(t) > 30:
+        fig.add_trace(go.Scatter(x=xs, y=r.rolling(30, min_periods=10).mean().round(2), mode='lines',
+                                 name="30-day average", line=dict(color=INK, width=2, dash='dot'),
+                                 hovertemplate="avg %{y:+.2f}%<extra></extra>"))
+    fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
+    fig.add_hline(y=r.mean(), line_color=VIOLET, line_dash="dash",
+                  annotation_text=f"average {r.mean():+.1f}%", annotation_position="top left",
+                  annotation_font=dict(color=VIOLET, size=11))
+    fig.update_layout(**PLOT_LAYOUT, height=CHART_H + 30, hovermode='x unified',
+                      title=f"Total portfolio: return after {_yrs(years)} for every {x_choice.lower()}",
+                      yaxis=dict(title="Return (%)", ticksuffix="%"),
+                      xaxis=dict(rangeslider=dict(visible=True, thickness=0.05)),
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0.55))
+    with panel():
+        _chart(fig, key="yoy_line")
+    st.caption("Green = that investment date made money after the holding period, red = it lost money. "
+               "Drag the slider under the chart to zoom.")
 
 
 # =========================================================
@@ -403,6 +514,19 @@ def _year_figure(ys, title):
                       legend=dict(orientation='h', yanchor='top', y=-0.22, x=0),
                       margin=dict(l=12, r=12, t=50, b=60))
     return fig
+
+
+def _yearly_tab(table):
+    fy = _cached_yearly(table, True)                      # April to March
+    cy = _cached_yearly(table, False)                     # January to December
+    c1, c2 = st.columns(2)
+    with c1, panel():
+        _chart(_year_figure(fy, "Financial year (April to March)"), key="yoy_yearly_fy")
+    with c2, panel():
+        _chart(_year_figure(cy, "Calendar year (January to December)"), key="yoy_yearly_cy")
+    st.caption("Bar = average return for investments made in that year. ▲ best and ▼ worst return in that year: "
+               "green if it was a gain, red if a loss. Hover for the exact dates. Financial year 2010-11 = "
+               "01-04-2010 to 31-03-2011. The first and last years can be partial.")
 
 
 # =========================================================
@@ -446,9 +570,10 @@ def _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_
                        title="Line curves", yaxis=dict(ticksuffix="%"),
                        legend=dict(orientation='h', yanchor='top', y=-0.12, x=0), margin=dict(l=12, r=12, t=50, b=40))
 
-    with panel():
+    c1, c2 = st.columns(2)
+    with c1, panel():
         _chart(fig, key="yoy_vs_bell")
-    with panel():
+    with c2, panel():
         _chart(fig2, key="yoy_vs_line")
 
     rows = []
@@ -498,6 +623,68 @@ def _drawdown_figure(dd, bench_dd, b_name, avg, worst, show_bench, height):
     return fig
 
 
+def _drawdown_tab(asset_dfs, settings, strat):
+    w_norm, amount, from_date, to_date = settings[:4]
+    res = _cached_drawdown(asset_dfs, *settings)
+    if res is None:
+        note("Not enough price data for these dates. Pick a longer period in the sidebar.", AMBER, "⚠️")
+        return
+    dd, periods, bench_dd, values = res
+    s = drawdown_summary(dd, periods)
+    b_name = ASSET_SHORT[strat['bench']]
+
+    explain(f"One investment of {inr(amount)} on {from_date:%d-%m-%Y}, held with {strat['desc']}. "
+            f"0% = the portfolio is at a new high. Anything below 0% = how much it has fallen from its best "
+            f"value so far. Deeper and wider blue areas = bigger, longer falls.", BLUE)
+
+    worst, longest = s['worst'], s['longest']
+    w_rec = (f"recovered {worst['Recovery']:%d-%m-%Y}" if worst is not None and worst['Recovered']
+             else "not recovered yet")
+    kpi_row([
+        dict(label="Max drawdown", value=pct(s['max']),
+             delta=(f"{worst['Peak']:%d-%m-%y} → {worst['Trough']:%d-%m-%y}" if worst is not None else "none"),
+             tone="bad" if s['max'] < 0 else "neutral", icon="🧯", accent=BAD),
+        dict(label="Current drawdown", value=pct(s['current']),
+             delta="at a new high" if s['current'] > -1e-9 else f"last high {s['last_high']:%d-%m-%Y}",
+             tone="good" if s['current'] > -1e-9 else "bad", icon="📍", accent=BLUE),
+        dict(label="Average drawdown", value=pct(s['avg']),
+             delta=f"{s['pct_under']:.0f}% of days below a high", icon="〰️", accent=VIOLET),
+        dict(label="Longest underwater",
+             value=f"{longest['Days underwater']:,} days" if longest is not None else "0 days",
+             delta=(f"{longest['Peak']:%d-%m-%y} → "
+                    + (f"{longest['Recovery']:%d-%m-%y}" if longest['Recovered'] else "still open"))
+             if longest is not None else "never below a high", icon="⏱️", accent=AMBER),
+    ])
+
+    start_value("dd_show_bench", False)
+    with panel():
+        show_bench = st.toggle(f"Show {b_name} drawdown for comparison", key="dd_show_bench")
+        _chart(_drawdown_figure(dd, bench_dd, b_name, s['avg'], worst, show_bench, CHART_H + 20), key="dd_underwater")
+    st.caption(f"Black dashed line = 0% (new high). Red dashed line = average drawdown on days below a high "
+               f"({s['avg']:.1f}%). Red dot = deepest point ({w_rec}). Drag on the chart to zoom, double-click to reset.")
+
+    if periods.empty:
+        return
+    st.markdown(f"**Worst drawdown periods** · {s['count']} in total")
+    top = periods.head(10).copy()
+    view = pd.DataFrame({
+        'Rank': range(1, len(top) + 1),
+        'Fall (%)': top['Depth (%)'],
+        'Peak': top['Peak'].dt.strftime('%d-%m-%Y'),
+        'Lowest point': top['Trough'].dt.strftime('%d-%m-%Y'),
+        'Back to peak': top['Recovery'].dt.strftime('%d-%m-%Y').fillna("not yet"),
+        'Days falling': top['Days to trough'],
+        'Days recovering': top['Days to recover'].map(lambda v: "—" if pd.isna(v) else f"{int(v):,}"),
+        'Total days': top['Days underwater'],
+    })
+    fmt = {'Fall (%)': '{:.2f}%', 'Days falling': '{:,}', 'Total days': '{:,}'}
+    st.dataframe(style_change_cols(view.style.format(fmt), ['Fall (%)']), width="stretch", hide_index=True)
+    csv = pd.DataFrame({'Date': dd.index.strftime('%d-%m-%Y'), 'Portfolio value (₹)': values.reindex(dd.index).round(2),
+                        'Drawdown (%)': dd.round(4)}).to_csv(index=False).encode('utf-8-sig')
+    st.download_button("⬇️  Download daily drawdown CSV", csv, file_name="portfolio_drawdown.csv",
+                       mime="text/csv", key="dl_drawdown")
+
+
 # =========================================================
 # Alpha: whole portfolio vs one benchmark, every month
 # =========================================================
@@ -512,6 +699,64 @@ STRATEGY_HELP = {
             "and the one that grew the LEAST (or fell) gets the BIGGEST.",
 }
 LOOKBACKS = {**LOOKBACK_OPTIONS, "2 Years": 24, "2.5 Years": 30}
+
+
+def _alpha_tab(asset_dfs, settings, strat):
+    w_norm, amount, from_date, to_date = settings[:4]
+    bench = strat['bench']
+    b_name = ASSET_SHORT[bench]
+    explain(f"Alpha = portfolio return − {b_name} return in the same period. Positive = the portfolio did better. "
+            f"Strategy and benchmark are set in the sidebar.", AMBER)
+    start_value("al_freq", "Monthly", list(ALPHA_FREQS))
+    freq = st.segmented_control("Alpha for every", list(ALPHA_FREQS), key="al_freq") or "Monthly"
+
+    tables = {f: _cached_alpha(asset_dfs, *settings, f) for f in ALPHA_FREQS}     # every frequency, cached
+    t = tables[freq]
+    s = alpha_summary(t)
+    if not s:
+        note("Not enough price data for these dates. Pick a longer period in the sidebar.", AMBER, "⚠️")
+        return
+    unit = ALPHA_FREQS[freq][0]
+    desc = strat['desc']
+    if freq == "Weekly" and ('SmallCap' in w_norm or bench == 'SmallCap'):
+        note("SmallCap prices are <b>monthly</b>, so most weeks it shows no change and then one big jump. "
+             "Weekly alpha is less reliable: Monthly or longer gives a cleaner picture.", AMBER, "💡")
+
+    # ---------- cards ----------
+    kpi_row([
+        dict(label=f"Average alpha per {unit}", value=pct(s['avg']),
+             delta=f"median {pct(s['median'])}", tone=tone_of(s['avg']), icon="🎯",
+             accent=GOOD if s['avg'] >= 0 else BAD),
+        dict(label=f"{unit.capitalize()}s beating {b_name}", value=f"{s['beat']} of {s['periods']}",
+             delta=f"{s['beat'] / s['periods'] * 100:.0f}% of {unit}s", tone=tone_of(s['beat'] - s['periods'] / 2),
+             icon="🏁", accent=CYAN),
+        dict(label=f"Best {unit}", value=pct(s['best']['Alpha (%)']), delta=s['best']['Period'], tone="good",
+             icon="🚀", accent=GOOD),
+        dict(label=f"Worst {unit}", value=pct(s['worst']['Alpha (%)']), delta=s['worst']['Period'], tone="bad",
+             icon="🧯", accent=BAD),
+    ])
+    st.caption(f"{desc} vs {b_name}. Over the whole period the portfolio returned {pct(s['port_total'])} and "
+               f"{b_name} {pct(s['bench_total'])}.")
+
+    # ---------- line graph: alpha in every period ----------
+    a = t['Alpha (%)'].round(2)
+    custom = np.stack([t['Period'], t['Portfolio (%)'].round(2), t['Benchmark (%)'].round(2)], axis=1)
+    fig = go.Figure(go.Scatter(
+        x=t['To'].dt.strftime('%Y-%m-%d'), y=a, mode='lines+markers', name="Alpha",
+        line=dict(color=VIOLET, width=1.8),
+        marker=dict(size=7 if len(t) <= 120 else 5, color=[_sign_color(v) for v in a]),
+        customdata=custom,
+        hovertemplate="<b>%{customdata[0]}</b><br>alpha %{y:+.2f}%<br>portfolio %{customdata[1]:+.2f}% · "
+                      + b_name + " %{customdata[2]:+.2f}%<extra></extra>"))
+    fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
+    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, title=f"Alpha each {unit} (portfolio return − {b_name} return)",
+                      showlegend=False, yaxis=dict(ticksuffix="%", title="Alpha"), hovermode='closest')
+    with panel():
+        _chart(fig, key="alpha_period_line")
+    st.caption(f"Each point is one {unit}: green = the portfolio beat {b_name} that {unit}, red = it did worse.")
+
+    # ---------- one table: yearly, half-yearly, quarterly, monthly and weekly alpha ----------
+    _alpha_table(tables, b_name, t.attrs.get('start', t['From'].iloc[0]))
 
 
 def _alpha_table(tables, b_name, start_day):
@@ -597,285 +842,3 @@ def _data_tab(table, years, asset_dfs, w_norm, from_date, to_date, trading_only)
         _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_only)
     if on["home_show_table"]:
         _show_table(table)
-
-
-# =========================================================
-# Tearsheet: every chart in sequence on the left, key metrics on the right
-# =========================================================
-_TEAR_CSS = """<style>
-/* numbered chart headers */
-.blk { display:flex; align-items:baseline; gap:12px; margin: 1.6rem 0 .45rem 0; }
-.blk:first-child { margin-top: .3rem; }
-.blk-n { font-size:.78rem; font-weight:800; color:#4F46E5; background:#EEF0FF; border-radius:8px; padding:3px 8px;
-  letter-spacing:.04em; }
-.blk-t { font-size:1.12rem; font-weight:800; color:#0F1B3D; letter-spacing:-.01em; }
-.blk-s { font-size:.86rem; color:#64708A; margin-left:auto; text-align:right; }
-/* key metrics table (quantstats style) */
-.mt { width:100%; border-collapse:collapse; font-size:.86rem; margin:0; }
-.mt, .mt tr, .mt td, .mt th { border:none !important; background:none !important; }
-.mt th { text-align:right; font-size:.75rem; font-weight:700; color:#64708A; padding:0 0 6px 0;
-  border-bottom:2px solid #0F1B3D !important; }
-.mt th:first-child { text-align:left; }
-.mt td { padding:3px 0; color:#0F1B3D; white-space:nowrap; }
-.mt td.v { text-align:right; font-variant-numeric: tabular-nums; font-weight:600; padding-left:10px; }
-.mt td.b { text-align:right; font-variant-numeric: tabular-nums; color:#64708A; padding-left:10px; }
-.mt tr.gap td { padding:0; height:8px; border-bottom:1px solid #E2E7F0 !important; }
-.mt tr.gap + tr td { padding-top:8px; }
-.mt .neg { color:#B91C1C; } .mt .pos { color:#15803D; }
-.mt-title { font-size:1.12rem; font-weight:800; color:#0F1B3D; margin:.2rem 0 .2rem 0; }
-.mt-sub { font-size:.82rem; color:#64708A; margin-bottom:12px; }
-/* keep the metrics in view while the charts scroll */
-[data-testid="stColumn"]:has(.st-key-tear_metrics) { align-self: stretch; }
-[data-testid="stLayoutWrapper"]:has(> .st-key-tear_metrics) { position: sticky; top: 1rem; z-index: 2; }
-.st-key-tear_metrics { max-height: calc(100vh - 2rem); overflow-y: auto; scrollbar-width: thin; }
-</style>"""
-
-
-def _block(n, title, sub=""):
-    s = f'<div class="blk-s">{sub}</div>' if sub else ""
-    st.markdown(f'<div class="blk"><span class="blk-n">{n:02d}</span><span class="blk-t">{title}</span>{s}</div>',
-                unsafe_allow_html=True)
-
-
-@st.cache_data(show_spinner="Calculating tearsheet...", max_entries=64)
-def _cached_tearsheet(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m, bench):
-    values = _cached_values(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m)
-    if values is None or len(values.dropna()) < 3:
-        return None
-    values = values.dropna()
-    b = benchmark_close(asset_dfs, bench)
-    b = b.reindex(b.index.union(values.index)).ffill().reindex(values.index).dropna()
-    return values, b, ts_metrics(values), ts_metrics(b), monthly_table(values)
-
-
-def _fig_cumulative(values, bench, b_name, log=False):
-    p = (values / values.iloc[0] - 1) * 100
-    q = (bench / bench.iloc[0] - 1) * 100
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=q.index, y=(q / 100 + 1) if log else q.round(2), mode='lines', name=b_name,
-                             line=dict(color=FAINT, width=1.4),
-                             hovertemplate=f"{b_name}: %{{customdata:+.1f}}%<extra></extra>", customdata=q))
-    fig.add_trace(go.Scatter(x=p.index, y=(p / 100 + 1) if log else p.round(2), mode='lines', name="Portfolio",
-                             line=dict(color=BLUE, width=2),
-                             hovertemplate="Portfolio: %{customdata:+.1f}%<extra></extra>", customdata=p))
-    if log:
-        lo, hi = float(min(p.min(), q.min())), float(max(p.max(), q.max()))
-        ticks = [t for t in (-90, -75, -50, -25, 0, 25, 50, 100, 200, 300, 500, 1000, 2000, 5000, 10000)
-                 if lo * 1.1 - 5 <= t <= hi * 1.1 + 5]
-        fig.add_hline(y=1, line_color=INK, line_dash="dash", line_width=1.1)
-        yaxis = dict(type='log', tickvals=[t / 100 + 1 for t in ticks], ticktext=[f"{t:,}%" for t in ticks])
-    else:
-        fig.add_hline(y=0, line_color=INK, line_dash="dash", line_width=1.1)
-        yaxis = dict(ticksuffix="%")
-    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, hovermode='x unified', yaxis=yaxis,
-                      margin=dict(l=12, r=12, t=30, b=12),
-                      legend=dict(orientation='h', yanchor='bottom', y=1.0, x=0))
-    return fig
-
-
-def _fig_monthly(grid):
-    z = grid.to_numpy(dtype=float)
-    text = [["" if np.isnan(v) else f"{v:+.1f}" for v in row] for row in z]
-    lim = float(np.nanpercentile(np.abs(z[:, :12]), 95)) if np.isfinite(z[:, :12]).any() else 1.0
-    fig = go.Figure(go.Heatmap(
-        z=z, x=list(grid.columns), y=[str(y) for y in grid.index], text=text, texttemplate="%{text}",
-        textfont=dict(size=10), zmid=0, zmin=-lim, zmax=lim, xgap=2, ygap=2, showscale=False,
-        colorscale=[[0, BAD], [0.5, "#FFFFFF"], [1, GOOD]],
-        hovertemplate="%{y} %{x}: <b>%{z:+.2f}%</b><extra></extra>"))
-    fig.update_layout(**PLOT_LAYOUT, height=max(260, 26 * len(grid) + 70), margin=dict(l=12, r=12, t=10, b=12),
-                      yaxis=dict(autorange='reversed', type='category', showgrid=False),
-                      xaxis=dict(side='top', showgrid=False))
-    return fig
-
-
-def _fig_timeline(table, years):
-    xs = table['Invest Date'].dt.strftime('%Y-%m-%d')
-    r = table['Return (%)'].round(2)
-    custom = np.stack([table['Invest Date'].dt.strftime('%d-%m-%Y'), table['Compare Date'].dt.strftime('%d-%m-%Y'),
-                       table['Invest Value (₹)'].round(0), table['Compare Value (₹)'].round(0)], axis=1)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=xs, y=r.clip(lower=0), mode='lines', line=dict(width=0), fill='tozeroy',
-                             fillcolor=hex_rgba(GOOD, 0.22), hoverinfo='skip', showlegend=False))
-    fig.add_trace(go.Scatter(x=xs, y=r.clip(upper=0), mode='lines', line=dict(width=0), fill='tozeroy',
-                             fillcolor=hex_rgba(BAD, 0.25), hoverinfo='skip', showlegend=False))
-    fig.add_trace(go.Scatter(x=xs, y=r, mode='lines', name=f"{_yrs(years)} return",
-                             line=dict(color=PORTFOLIO, width=1.4), customdata=custom,
-                             hovertemplate="Invest %{customdata[0]}: ₹%{customdata[2]:,.0f}<br>"
-                                           "Value on %{customdata[1]}: ₹%{customdata[3]:,.0f}<br>"
-                                           "<b>%{y:+.2f}%</b><extra></extra>"))
-    if len(table) > 30:
-        fig.add_trace(go.Scatter(x=xs, y=r.rolling(30, min_periods=10).mean().round(2), mode='lines',
-                                 name="30-day average", line=dict(color=VIOLET, width=2, dash='dot'),
-                                 hovertemplate="avg %{y:+.2f}%<extra></extra>"))
-    fig.add_hline(y=0, line_color=INK, line_dash="dash", line_width=1.1)
-    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, hovermode='x unified', yaxis=dict(ticksuffix="%"),
-                      margin=dict(l=12, r=12, t=30, b=12), legend=dict(orientation='h', yanchor='bottom', y=1.0, x=0))
-    return fig
-
-
-def _fig_alpha(t, b_name, unit):
-    a = t['Alpha (%)'].round(2)
-    custom = np.stack([t['Period'], t['Portfolio (%)'].round(2), t['Benchmark (%)'].round(2)], axis=1)
-    fig = go.Figure(go.Bar(
-        x=t['To'].dt.strftime('%Y-%m-%d'), y=a, marker_color=[_sign_color(v) for v in a], marker_line_width=0,
-        customdata=custom, name="Alpha",
-        hovertemplate="<b>%{customdata[0]}</b><br>alpha %{y:+.2f}%<br>portfolio %{customdata[1]:+.2f}% · "
-                      + b_name + " %{customdata[2]:+.2f}%<extra></extra>"))
-    fig.add_hline(y=0, line_color=INK, line_dash="dash", line_width=1.1)
-    fig.add_hline(y=float(a.mean()), line_color=VIOLET, line_dash="dot", line_width=1.5)
-    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, showlegend=False, bargap=0.15,
-                      yaxis=dict(ticksuffix="%"), margin=dict(l=12, r=12, t=30, b=12))
-    return fig
-
-
-def _metrics_table(pm, bm, b_name, strat):
-    def cell(m, key, kind, cls):
-        v = m.get(key)
-        txt = ts_fmt(v, kind)
-        tone = ""
-        if kind == 'pct' and isinstance(v, (int, float)) and v == v and key not in ('time_in_market', 'psr', 'vol'):
-            tone = " neg" if v < 0 else ""
-        return f'<td class="{cls}{tone}">{txt}</td>'
-
-    rows = []
-    for g, group in enumerate(TS_LAYOUT):
-        if g:
-            rows.append('<tr class="gap"><td colspan="3"></td></tr>')
-        for label, key, kind in group:
-            rows.append(f"<tr><td>{label}</td>{cell(pm, key, kind, 'v')}{cell(bm, key, kind, 'b')}</tr>")
-    st.markdown(
-        f'<div class="mt-title">Key performance metrics</div>'
-        f'<div class="mt-sub">{strat["desc"]} · daily values, 252 trading days a year, risk-free rate 0%</div>'
-        f'<table class="mt"><thead><tr><th>Metric</th><th>Portfolio</th><th>{b_name}</th></tr></thead>'
-        f'<tbody>{"".join(rows)}</tbody></table>', unsafe_allow_html=True)
-
-
-def _tearsheet(asset_dfs, settings, strat, table, stats, years):
-    st.markdown(_TEAR_CSS, unsafe_allow_html=True)
-    b_name = ASSET_SHORT[strat['bench']]
-    amount, from_date = settings[1], settings[2]
-    ts = _cached_tearsheet(asset_dfs, *settings)
-    ddr = _cached_drawdown(asset_dfs, *settings)
-
-    section("Tearsheet", f"One investment of {inr(amount)} on {from_date:%d-%m-%Y}, held with "
-                         f"{strat['short']} · compared with {b_name}", "📊", BLUE)
-    if ts is None or ddr is None:
-        note("Not enough price data for these dates. Pick a longer period in the sidebar.", AMBER, "⚠️")
-        return
-    values, bench, pm, bm, grid = ts
-    dd, periods, bench_dd, _ = ddr
-    s_dd = drawdown_summary(dd, periods)
-
-    left, right = st.columns([2.15, 1], gap="large", vertical_alignment="top")
-
-    with right, st.container(border=True, key="tear_metrics"):
-        _metrics_table(pm, bm, b_name, strat)
-
-    with left:
-        n = 0
-
-        n += 1
-        _block(n, "Cumulative returns", f"portfolio vs {b_name}")
-        with panel():
-            _chart(_fig_cumulative(values, bench, b_name), key="ts_cum")
-
-        n += 1
-        _block(n, "Cumulative returns (log scaled)", "equal % moves look equal")
-        with panel():
-            _chart(_fig_cumulative(values, bench, b_name, log=True), key="ts_cum_log")
-
-        n += 1
-        _block(n, "Underwater plot", f"max {s_dd['max']:.1f}% · average {s_dd['avg']:.1f}%")
-        with panel():
-            start_value("dd_show_bench", False)
-            show_bench = st.toggle(f"Show {b_name} drawdown too", key="dd_show_bench")
-            fig = _drawdown_figure(dd, bench_dd, b_name, s_dd['avg'], s_dd['worst'], show_bench, CHART_H)
-            fig.update_layout(title=None, margin=dict(l=12, r=12, t=20, b=12))
-            _chart(fig, key="dd_underwater")
-        st.caption("Black dashed line = new high (0%). Red dashed line = average drawdown. "
-                   "Red dot = deepest fall. The worst periods are listed under Details below.")
-
-        n += 1
-        _block(n, "Monthly returns (%)", "green = up month, red = down month")
-        with panel():
-            _chart(_fig_monthly(grid), key="ts_monthly")
-
-        n += 1
-        _block(n, f"{_yrs(years).capitalize()} return distribution", f"{stats['count']:,} start dates")
-        with panel():
-            fig = _bell_figure(table['Return (%)'], stats['mean'], stats['std'], PORTFOLIO, None, height=CHART_H)
-            fig.update_layout(margin=dict(l=12, r=12, t=30, b=12))
-            _chart(fig, key="yoy_bell")
-        st.caption("Each bar = how many start dates gave that return. Green = gain, red = loss. "
-                   "Dark line = a normal bell curve with the same average and spread.")
-
-        n += 1
-        _block(n, f"{_yrs(years).capitalize()} return for every start date", "rolling, same-date")
-        with panel():
-            _chart(_fig_timeline(table, years), key="yoy_line")
-
-        n += 1
-        _block(n, f"Alpha vs {b_name}", "portfolio return − benchmark return")
-        with panel():
-            start_value("al_freq", "Monthly", list(ALPHA_FREQS))
-            freq = st.segmented_control("Alpha for every", list(ALPHA_FREQS), key="al_freq",
-                                        label_visibility="collapsed") or "Monthly"
-            t = _cached_alpha(asset_dfs, *settings, freq)
-            s = alpha_summary(t)
-            if s:
-                unit = ALPHA_FREQS[freq][0]
-                _chart(_fig_alpha(t, b_name, unit), key="alpha_period_line")
-                st.caption(f"Average alpha {pct(s['avg'])} per {unit} (purple dotted line). "
-                           f"Beat {b_name} in {s['beat']} of {s['periods']} {unit}s. "
-                           f"Best {unit}: {pct(s['best']['Alpha (%)'])} ({s['best']['Period']}), "
-                           f"worst: {pct(s['worst']['Alpha (%)'])} ({s['worst']['Period']}).")
-            else:
-                note("Not enough data for alpha in this period.", AMBER, "⚠️")
-
-        n += 1
-        _block(n, "Year by year: financial year", "April to March")
-        with panel():
-            fig = _year_figure(_cached_yearly(table, True), None)
-            _chart(fig, key="yoy_yearly_fy")
-
-        n += 1
-        _block(n, "Year by year: calendar year", "January to December")
-        with panel():
-            fig = _year_figure(_cached_yearly(table, False), None)
-            _chart(fig, key="yoy_yearly_cy")
-        st.caption("Bar = average return for start dates in that year. ▲ best and ▼ worst start date that year.")
-
-
-def _details(asset_dfs, settings, strat, table, years, w_norm, from_date, to_date, trading_only):
-    b_name = ASSET_SHORT[strat['bench']]
-    ddr = _cached_drawdown(asset_dfs, *settings)
-    if ddr is not None:
-        dd, periods, _, values = ddr
-        st.markdown(f"**Worst drawdown periods** · {len(periods)} in total")
-        if not periods.empty:
-            top = periods.head(10)
-            view = pd.DataFrame({
-                'Rank': range(1, len(top) + 1), 'Fall (%)': top['Depth (%)'],
-                'Peak': top['Peak'].dt.strftime('%d-%m-%Y'), 'Lowest point': top['Trough'].dt.strftime('%d-%m-%Y'),
-                'Back to peak': top['Recovery'].dt.strftime('%d-%m-%Y').fillna("not yet"),
-                'Days falling': top['Days to trough'],
-                'Days recovering': top['Days to recover'].map(lambda v: "—" if pd.isna(v) else f"{int(v):,}"),
-                'Total days': top['Days underwater'],
-            })
-            st.dataframe(style_change_cols(view.style.format({'Fall (%)': '{:.2f}%', 'Days falling': '{:,}',
-                                                              'Total days': '{:,}'}), ['Fall (%)']),
-                         width="stretch", hide_index=True)
-            csv = pd.DataFrame({'Date': dd.index.strftime('%d-%m-%Y'),
-                                'Portfolio value (₹)': values.reindex(dd.index).round(2),
-                                'Drawdown (%)': dd.round(4)}).to_csv(index=False).encode('utf-8-sig')
-            st.download_button("⬇️  Download daily drawdown CSV", csv, file_name="portfolio_drawdown.csv",
-                               mime="text/csv", key="dl_drawdown")
-
-    st.markdown("**Alpha table**")
-    tables = {f: _cached_alpha(asset_dfs, *settings, f) for f in ALPHA_FREQS}
-    first = next((t for t in tables.values() if t is not None and not t.empty), None)
-    if first is not None:
-        _alpha_table(tables, b_name, first.attrs.get('start', first['From'].iloc[0]))
-
-    st.markdown("**Year-over-year data**")
-    _data_tab(table, years, asset_dfs, w_norm, from_date, to_date, trading_only)
