@@ -11,6 +11,7 @@ For every week / month / quarter / half-year / year:
     benchmark return = benchmark close at the period end / close at the end of the previous period − 1
     alpha (%)        = portfolio return − benchmark return   (the "active return")
 """
+import numpy as np
 import pandas as pd
 
 from src.yoy_returns import clean_prices, _max_gap_days
@@ -173,3 +174,57 @@ def alpha_summary(t):
         'port_total': float(t['Portfolio index'].iloc[-1] - 100),
         'bench_total': float(t['Benchmark index'].iloc[-1] - 100),
     }
+
+# ---------------------------------------------------------
+# Proper alpha statistics (CAPM regression on period returns)
+# ---------------------------------------------------------
+PERIODS_PER_YEAR = {"Weekly": 52, "Monthly": 12, "Quarterly": 4, "Half-yearly": 2, "Yearly": 1}
+
+
+def alpha_stats(t, freq):
+    """Regression of portfolio returns on benchmark returns, per period (risk-free rate 0):
+
+        portfolio = α + β × benchmark + noise
+
+    alpha_ann       : Jensen's alpha, annualised (%)  – return NOT explained by just following the benchmark
+    beta            : how much the portfolio moves when the benchmark moves 1%
+    r2              : share of the portfolio's moves explained by the benchmark (0–1)
+    excess_ann      : average (portfolio − benchmark) per period, annualised (%)
+    tracking_error  : spread of (portfolio − benchmark), annualised (%)
+    info_ratio      : excess_ann / tracking_error  (alpha per unit of extra risk; > 0.5 is good)
+    up_capture      : % of the benchmark's UP periods the portfolio captured (higher is better)
+    down_capture    : % of the benchmark's DOWN periods the portfolio took (lower is better)
+    """
+    if t is None or len(t) < 3:
+        return {}
+    p, b = t['Portfolio (%)'].to_numpy() / 100, t['Benchmark (%)'].to_numpy() / 100
+    n = PERIODS_PER_YEAR.get(freq, 12)
+    var_b = float(np.var(b, ddof=1))
+    beta = float(np.cov(p, b, ddof=1)[0, 1] / var_b) if var_b > 0 else float('nan')
+    alpha = float(p.mean() - beta * b.mean())
+    corr = float(np.corrcoef(p, b)[0, 1]) if p.std() > 0 and b.std() > 0 else float('nan')
+    ex = p - b
+    te = float(ex.std(ddof=1) * np.sqrt(n))
+    up, down = b > 0, b < 0
+    return {
+        'alpha_ann': alpha * n * 100,
+        'beta': beta,
+        'r2': corr ** 2,
+        'excess_ann': float(ex.mean() * n * 100),
+        'tracking_error': te * 100,
+        'info_ratio': float(ex.mean() * n / te) if te > 0 else float('nan'),
+        'up_capture': float(p[up].mean() / b[up].mean() * 100) if up.any() else float('nan'),
+        'down_capture': float(p[down].mean() / b[down].mean() * 100) if down.any() else float('nan'),
+        'periods': int(len(t)),
+        'alpha_period': alpha * 100,
+    }
+
+
+def rolling_alpha(monthly, months=12):
+    """Rolling 1-year alpha from a Monthly period_alpha() table:
+    portfolio return over the last `months` months − benchmark return over the same months (%)."""
+    if monthly is None or len(monthly) <= months:
+        return pd.Series(dtype=float)
+    pi = monthly.set_index('To')['Portfolio index']
+    bi = monthly.set_index('To')['Benchmark index']
+    return ((pi / pi.shift(months) - 1) - (bi / bi.shift(months) - 1)).dropna() * 100

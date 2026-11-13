@@ -1,4 +1,5 @@
 import os
+import time
 import re
 import pandas as pd
 import requests
@@ -178,10 +179,27 @@ def download_sheet_csv(csv_url: str) -> tuple[pd.DataFrame | None, str | None]:
     }
     
     try:
-        response = requests.get(csv_url, headers=headers, timeout=12)
+        # 2 tries, only for temporary Google errors (429 / 5xx). A connection error or timeout is not
+        # retried (it would only make the page wait longer; the app falls back and retries in background).
+        response, last_error = None, None
+        for attempt in range(2):
+            if attempt:
+                time.sleep(1)
+            try:
+                response = requests.get(csv_url, headers=headers, timeout=(6, 30))
+            except requests.RequestException as e:
+                response, last_error = None, e
+                break
+            if response.status_code == 429 or response.status_code >= 500:
+                last_error = f"HTTP {response.status_code}"
+                continue
+            break
+        if response is None:
+            return None, f"Connection failed: {last_error}"
+
         if response.status_code in [401, 403]:
             return None, "UNAUTHORIZED"
-            
+
         if response.status_code != 200:
             return None, f"HTTP Error {response.status_code}: Unable to reach Google Sheet."
 

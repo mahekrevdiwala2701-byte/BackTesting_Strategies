@@ -1,5 +1,9 @@
 """Shared data loading, cleaning and table helpers used by every page."""
+import os
 import re
+import tempfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
@@ -159,39 +163,164 @@ def style_change_cols(styler, cols):
 # ---------------------------------------------------------
 # Loading
 # ---------------------------------------------------------
-@st.cache_data(show_spinner="Loading data from Google Sheets...", ttl=3600)   # 1 hour; the sidebar button refreshes sooner
-def load_all_assets():
-    """Returns (asset_dfs, fetch_errors)."""
-    asset_dfs, fetch_errors = {}, {}
+# How the data loads (fast):
+#  1. The last good download of each Google Sheet is kept on disk, so the app opens instantly.
+#  2. When that copy is older than LIVE_MAX_AGE, the sheets are downloaded again IN THE BACKGROUND:
+#     nobody waits; the next click shows the new prices.
+#  3. Only the very first start (no saved copy yet) waits for Google.
+#  4. A sheet that cannot be loaded at all falls back to its backup CSV, with a warning on every page.
+LIVE_MAX_AGE = 3600            # seconds: saved copy younger than this is used as is
+BACKUP_RETRY_SECONDS = 120     # while a backup CSV is shown, try the live sheets again (in background) this often
+CACHE_DIR = os.path.join(tempfile.gettempdir(), "multi_asset_lab_sheets")
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # folder with app.py + backup CSVs
 
-    # Download all 4 sheets AT THE SAME TIME (before: one after another, up to 12 s each)
+_refresh_lock = threading.Lock()
+_refresh_state = {"running": False, "last_try": 0.0}
+
+
+def _friendly_error(err):
+    """Short reason a person can act on (technical detail stays after a ' | ')."""
+    if err == "UNAUTHORIZED":
+        return ("sheet not shared publicly: in Google Sheets use Share → General access → "
+                "'Anyone with the link' → Viewer")
+    e = str(err or "")
+    if e.startswith("Connection failed"):
+        return "could not connect to Google Sheets (no internet, or Google blocked on this server) | " + e
+    if e.startswith("HTTP"):
+        return "Google Sheets gave an error | " + e
+    return e
+
+
+# ---------- saved copy on disk ----------
+def _cache_path(name):
+    return os.path.join(CACHE_DIR, f"{name}.pkl")
+
+
+def _save_to_disk(dfs):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        for name, df in dfs.items():
+            tmp = _cache_path(name) + ".tmp"
+            df.to_pickle(tmp)
+            os.replace(tmp, _cache_path(name))              # atomic: a half-written file is never read
+    except OSError:
+        pass                                                # read-only server: just keep it in memory
+
+
+def _read_from_disk():
+    """{name: df} saved earlier and the time of the OLDEST of them (None if nothing saved)."""
+    dfs, times = {}, []
+    for name in SHEET_URLS:
+        path = _cache_path(name)
+        try:
+            dfs[name] = pd.read_pickle(path)
+            times.append(os.path.getmtime(path))
+        except Exception:                                   # missing or unreadable: download it
+            continue
+    return dfs, (min(times) if times else None)
+
+
+def data_updated_at():
+    """When the live sheet data on screen was downloaded (epoch seconds), or None."""
+    return _read_from_disk()[1]
+
+
+# ---------- download ----------
+def _download_live():
+    """Download all 4 sheets at the same time. Returns ({name: df}, {name: error})."""
     urls = {name: parse_google_sheet_url(raw_url) for name, raw_url in SHEET_URLS.items()}
     with ThreadPoolExecutor(max_workers=len(urls)) as pool:
         futures = {name: pool.submit(download_sheet_csv, url) for name, url in urls.items()}
         downloaded = {name: f.result() for name, f in futures.items()}
-
-    for name in SHEET_URLS:
-        df_raw, err = downloaded[name]
+    dfs, errors = {}, {}
+    for name, (df_raw, err) in downloaded.items():
         df_clean = normalize_asset_df(df_raw)
         if df_clean is not None:
-            asset_dfs[name] = df_clean
+            dfs[name] = df_clean
         else:
             found = list(df_raw.columns) if df_raw is not None else []
-            fetch_errors[name] = err or f"Couldn't find a 'Date' and 'Close' column. Columns found: {found}"
+            errors[name] = _friendly_error(err) or f"Couldn't find a 'Date' and 'Close' column. Columns found: {found}"
+    return dfs, errors
 
-    # Fallback to local CSV files
-    local_datasets = get_available_datasets(".")
+
+def _refresh_in_background():
+    """Download the sheets in a background thread (at most one at a time). The page is not blocked;
+    when it finishes, the next click shows the fresh data."""
+    with _refresh_lock:
+        if _refresh_state["running"]:
+            return
+        _refresh_state.update(running=True, last_try=time.time())
+
+    def run():
+        try:
+            dfs, _ = _download_live()
+            if dfs:
+                _save_to_disk(dfs)
+                _assemble.clear()
+        finally:
+            _refresh_state["running"] = False
+
+    threading.Thread(target=run, daemon=True, name="sheet-refresh").start()
+
+
+# ---------- putting it together ----------
+@st.cache_data(show_spinner="Loading data from Google Sheets (first start only)...", ttl=300)
+def _assemble(force=False):
+    """Returns (asset_dfs, fetch_errors, backup_used, saved_at)."""
+    asset_dfs, saved_at = ({}, None) if force else _read_from_disk()
+    fetch_errors, backup_used = {}, {}
+
+    missing = [n for n in SHEET_URLS if n not in asset_dfs]
+    if missing:                                             # first start (or refresh button): must wait once
+        live, errors = _download_live()
+        _save_to_disk(live)
+        asset_dfs.update(live)
+        fetch_errors.update({n: e for n, e in errors.items() if n not in asset_dfs})
+        saved_at = time.time() if live and not saved_at else saved_at
+
+    # Backup: local CSV files, only for the sheets that could not be loaded
+    local_datasets = get_available_datasets(PROJECT_DIR)
     for name in ASSETS:
-        if name not in asset_dfs:
-            for loc_name, path in local_datasets.items():
-                if name.lower() in loc_name.lower():
-                    df_local = normalize_asset_df(load_csv_data(path))
-                    if df_local is not None:
-                        asset_dfs[name] = df_local
-                        fetch_errors.pop(name, None)
-                    break
+        if name in asset_dfs:
+            continue
+        for loc_name, path in local_datasets.items():
+            if name.lower() in loc_name.lower():
+                df_local = normalize_asset_df(load_csv_data(path))
+                if df_local is not None:
+                    asset_dfs[name] = df_local
+                    backup_used[name] = os.path.basename(str(path))
+                    fetch_errors[name] = (f"Live Google Sheet not loaded ({fetch_errors.get(name)}). "
+                                          f"Showing the backup file {backup_used[name]} instead: its prices can "
+                                          f"be old or wrong.")
+                break
+    return asset_dfs, fetch_errors, backup_used, saved_at
 
-    return asset_dfs, fetch_errors
+
+def load_all_assets(force_refresh=False):
+    """Returns (asset_dfs, fetch_errors). Fast: uses the saved copy of the live sheets and refreshes it in
+    the background. force_refresh=True (the sidebar button) downloads from Google right now."""
+    if force_refresh:
+        _assemble.clear()
+    asset_dfs, fetch_errors, backup_used, saved_at = _assemble(force_refresh)
+    if force_refresh:
+        _assemble.clear()                                   # later runs use the normal (disk) path again
+
+    stale = saved_at is None or time.time() - saved_at > LIVE_MAX_AGE
+    retry_backup = backup_used and time.time() - _refresh_state["last_try"] > BACKUP_RETRY_SECONDS
+    if (stale and not backup_used) or retry_backup:
+        _refresh_in_background()
+    return asset_dfs, dict(fetch_errors)
+
+
+def short_reason(err):
+    """The part of a fetch error meant for the banner (no technical detail)."""
+    e = str(err).replace("Live Google Sheet not loaded (", "", 1)
+    return e.split(" | ")[0].split("). Showing the backup")[0]
+
+
+def backup_assets(fetch_errors):
+    """Names of the assets that are showing backup CSV data instead of the live sheet."""
+    return [n for n, e in fetch_errors.items() if str(e).startswith("Live Google Sheet not loaded")]
 
 
 def filter_period(asset_dfs, start_date, end_date):

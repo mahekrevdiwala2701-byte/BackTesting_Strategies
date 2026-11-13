@@ -618,8 +618,12 @@ def sidebar_label(text: str):
 
 def sidebar_footer(fetch_errors, key: str = "main"):
     st.sidebar.markdown("---")
+    updated = st.session_state.get("_data_updated_text")
+    if updated:
+        st.sidebar.caption(updated)
     if st.sidebar.button("🔄  Refresh live sheet data", width="stretch", key=f"refresh_{key}"):
         st.cache_data.clear()
+        st.session_state["_force_sheet_refresh"] = True     # app.py downloads from Google right now
         st.rerun()
     if fetch_errors:
         with st.sidebar.expander(f"⚠️ Data load issues ({len(fetch_errors)})", expanded=False):

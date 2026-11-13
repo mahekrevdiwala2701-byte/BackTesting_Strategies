@@ -17,6 +17,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from src.ui import (
@@ -30,9 +31,11 @@ from src.period_picker import today_ist
 from src.yoy_returns import (same_date_returns, portfolio_same_date_returns, summary_stats, yearly_summary,
                              normal_curve, to_csv)
 from src.alpha import (calculated_investment_values, benchmark_close, period_alpha, alpha_summary,
+                       alpha_stats, rolling_alpha,
                        FREQUENCIES as ALPHA_FREQS)
 from src.strategies import STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS
 from src.drawdown import underwater, drawdown_periods, drawdown_summary
+from src.tearsheet import metrics as ts_metrics, period_returns, PERIODS, LAYOUT as KPI_LAYOUT, fmt as ts_fmt
 
 DEFAULT_START = date(2010, 1, 1)
 PORT_COLOR = INDIGO        # cards about the whole portfolio (charts draw it as the white PORTFOLIO line)
@@ -77,7 +80,7 @@ _NO_ANIMATION_CSS = """<style>
   background: #FFFFFF; border: 1px solid #E2E7F0; box-shadow: 0 1px 2px rgba(15,27,61,.04); }
 .st-key-home_view, .st-key-home_view_bar [data-testid="stButtonGroup"] { width: 100% !important; }
 .st-key-home_view_bar [role="radiogroup"] { display: flex !important; flex-wrap: wrap; gap: 4px; width: 100% !important; }
-.st-key-home_view_bar [role="radiogroup"] > button { flex: 1 1 140px !important; max-width: none !important;
+.st-key-home_view_bar [role="radiogroup"] > button { flex: 1 1 120px !important; max-width: none !important;
   justify-content: center; font-weight: 600; border-radius: 10px !important; }
 .st-key-home_view_bar [role="radiogroup"] > button * { max-width: none !important; overflow: visible !important;
   text-overflow: clip !important; white-space: nowrap !important; }
@@ -147,6 +150,8 @@ VIEWS = {                       # key -> (button label, section title, subtitle,
                  "How far below its previous high the portfolio was, every day", "🌊", BLUE),
     "alpha":    ("🎯 Alpha",          "Alpha", "How much the portfolio beat the benchmark each period", "🎯", AMBER),
     "yearly":   ("🗓️ Year by year",   "Year by year", "Average, best and worst return per investment year", "🗓️", AMBER),
+    "kpi":      ("📊 Key performance", "Key performance", "Strategy metrics and returns per week, month, quarter, year",
+                 "📊", INDIGO),
     "data":     ("📥 Data",           "Data & more", "Download everything, the full table, each asset", "📥", CYAN),
 }
 def render_home_page(asset_dfs, fetch_errors):
@@ -259,6 +264,8 @@ def render_home_page(asset_dfs, fetch_errors):
         _alpha_tab(asset_dfs, settings, strat)
     elif view == "yearly":
         _yearly_tab(table)
+    elif view == "kpi":
+        _kpi_tab(asset_dfs, settings, strat)
     else:
         _data_tab(table, years, asset_dfs, w_norm, from_date, to_date, trading_only)
 
@@ -432,6 +439,9 @@ def _mini_stats(rows):
 # =========================================================
 # Line curve
 # =========================================================
+GAP_DAYS = 10          # dates further apart than this are a hole in the data: the line is broken there
+
+
 def _line_tab(table, years):
     c1, c2 = st.columns([1, 1], vertical_alignment="center")
     with c1:
@@ -441,27 +451,64 @@ def _line_tab(table, years):
         start_value("yoy_line_smooth", True)
         smooth = st.toggle("Add 30-day average line", key="yoy_line_smooth")
     xcol = 'Invest Date' if x_choice == "Investment date" else 'Compare Date'
-    xs = table[xcol].dt.strftime('%Y-%m-%d')               # short date text = much smaller page than full timestamps
 
-    t = table
+    # Break the line where dates are missing (holes in the source data), instead of drawing a straight
+    # line across them: an empty row is put into every gap longer than GAP_DAYS.
+    t = table.sort_values(xcol).reset_index(drop=True)
+    gap = t[xcol].diff().dt.days
+    holes = gap[gap > GAP_DAYS].index
+    starts, ends = t[xcol].shift(1)[holes], t[xcol][holes]
+    if len(holes):
+        blanks = pd.DataFrame({xcol: starts.values + pd.Timedelta(days=1)}, index=holes - 0.5)
+        t = pd.concat([t, blanks]).sort_index().reset_index(drop=True)
+    # 30-day average over calendar days, never spanning a hole
+    seg = t['Return (%)'].isna().cumsum()
+    avg = (t.set_index(xcol).groupby(seg.values)['Return (%)']
+           .transform(lambda s: s.rolling('30D', min_periods=10).mean()).to_numpy())
+
+    xs = t[xcol].dt.strftime('%Y-%m-%d')                   # short date text = much smaller page than full timestamps
     r = t['Return (%)'].round(2)                          # 2 decimals is all the chart shows (smaller page)
-    custom = np.stack([t['Invest Date'].dt.strftime('%d-%m-%Y'), t['Compare Date'].dt.strftime('%d-%m-%Y'),
+    custom = np.stack([t['Invest Date'].dt.strftime('%d-%m-%Y').fillna(""),
+                       t['Compare Date'].dt.strftime('%d-%m-%Y').fillna(""),
                        t['Invest Value (₹)'].round(0), t['Compare Value (₹)'].round(0)], axis=1)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=xs, y=r.clip(lower=0), mode='lines', line=dict(width=0),
-                             fill='tozeroy', fillcolor=hex_rgba(GOOD, 0.22), hoverinfo='skip', showlegend=False))
-    fig.add_trace(go.Scatter(x=xs, y=r.clip(upper=0), mode='lines', line=dict(width=0),
-                             fill='tozeroy', fillcolor=hex_rgba(BAD, 0.25), hoverinfo='skip', showlegend=False))
+    # green / red shading, drawn separately for each stretch of data so it never bridges a hole
+    parts = [g for _, g in r.groupby(seg.values) if g.notna().sum() > 1]
+    if len(parts) > 40:                                   # very patchy data: one shape is lighter for the page
+        parts = [r]
+    for g in parts:
+        g = g.dropna()
+        for vals, color in ((g.clip(lower=0), hex_rgba(GOOD, 0.22)), (g.clip(upper=0), hex_rgba(BAD, 0.25))):
+            fig.add_trace(go.Scatter(x=xs[g.index], y=vals, mode='lines', line=dict(width=0), fill='tozeroy',
+                                     fillcolor=color, hoverinfo='skip', showlegend=False))
     fig.add_trace(go.Scatter(
         x=xs, y=r, mode='lines', name=f"Portfolio {_yrs(years)} return",
         line=dict(color=PORTFOLIO, width=1.6), customdata=custom,
         hovertemplate="Invest %{customdata[0]}: ₹%{customdata[2]:,.0f}<br>"
                       "Value on %{customdata[1]}: ₹%{customdata[3]:,.0f}<br>"
                       "<b>%{y:+.2f}%</b><extra></extra>"))
+    lone = r.groupby(seg.values).transform(lambda g: g.notna().sum()) == 1     # a single date between two holes
+    lone &= r.notna()
+    if lone.any():
+        fig.add_trace(go.Scatter(x=xs[lone], y=r[lone], mode='markers', marker=dict(size=6, color=PORTFOLIO),
+                                 customdata=custom[lone.to_numpy()], showlegend=False,
+                                 hovertemplate="Invest %{customdata[0]} (isolated date)<br>"
+                                               "<b>%{y:+.2f}%</b><extra></extra>"))
     if smooth and len(t) > 30:
-        fig.add_trace(go.Scatter(x=xs, y=r.rolling(30, min_periods=10).mean().round(2), mode='lines',
+        fig.add_trace(go.Scatter(x=xs, y=np.round(avg, 2), mode='lines',
                                  name="30-day average", line=dict(color=INK, width=2, dash='dot'),
                                  hovertemplate="avg %{y:+.2f}%<extra></extra>"))
+    bands = []                                             # grey band = no data; nearby holes become one band
+    for a_, b_ in zip(starts, ends):
+        if (b_ - a_).days > 30:
+            if bands and (a_ - bands[-1][1]).days < 120:
+                bands[-1][1] = b_
+            else:
+                bands.append([a_, b_])
+    for a_, b_ in bands:
+        fig.add_vrect(x0=a_.strftime('%Y-%m-%d'), x1=b_.strftime('%Y-%m-%d'), fillcolor=hex_rgba(FAINT, 0.18),
+                      line_width=0, layer="below", annotation_text="missing data",
+                      annotation_position="top", annotation_font=dict(color=MUTED, size=10))
     fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
     fig.add_hline(y=r.mean(), line_color=VIOLET, line_dash="dash",
                   annotation_text=f"average {r.mean():+.1f}%", annotation_position="top left",
@@ -701,62 +748,227 @@ STRATEGY_HELP = {
 LOOKBACKS = {**LOOKBACK_OPTIONS, "2 Years": 24, "2.5 Years": 30}
 
 
-def _alpha_tab(asset_dfs, settings, strat):
-    w_norm, amount, from_date, to_date = settings[:4]
-    bench = strat['bench']
-    b_name = ASSET_SHORT[bench]
-    explain(f"Alpha = portfolio return − {b_name} return in the same period. Positive = the portfolio did better. "
-            f"Strategy and benchmark are set in the sidebar.", AMBER)
-    start_value("al_freq", "Monthly", list(ALPHA_FREQS))
-    freq = st.segmented_control("Alpha for every", list(ALPHA_FREQS), key="al_freq") or "Monthly"
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_growth(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m, bench):
+    """Portfolio and benchmark every day, both starting at 100."""
+    values = _cached_values(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m)
+    if values is None or len(values.dropna()) < 2:
+        return None
+    v = values.dropna()
+    v = v[~v.index.duplicated(keep='last')].sort_index()
+    b = benchmark_close(asset_dfs, bench)
+    b = b.reindex(b.index.union(v.index)).ffill().reindex(v.index)
+    df = pd.DataFrame({'P': v, 'B': b}).dropna()
+    return (df / df.iloc[0] * 100).round(3)
 
-    tables = {f: _cached_alpha(asset_dfs, *settings, f) for f in ALPHA_FREQS}     # every frequency, cached
-    t = tables[freq]
-    s = alpha_summary(t)
-    if not s:
-        note("Not enough price data for these dates. Pick a longer period in the sidebar.", AMBER, "⚠️")
-        return
-    unit = ALPHA_FREQS[freq][0]
-    desc = strat['desc']
-    if freq == "Weekly" and ('SmallCap' in w_norm or bench == 'SmallCap'):
-        note("SmallCap prices are <b>monthly</b>, so most weeks it shows no change and then one big jump. "
-             "Weekly alpha is less reliable: Monthly or longer gives a cleaner picture.", AMBER, "💡")
 
-    # ---------- cards ----------
-    kpi_row([
-        dict(label=f"Average alpha per {unit}", value=pct(s['avg']),
-             delta=f"median {pct(s['median'])}", tone=tone_of(s['avg']), icon="🎯",
-             accent=GOOD if s['avg'] >= 0 else BAD),
-        dict(label=f"{unit.capitalize()}s beating {b_name}", value=f"{s['beat']} of {s['periods']}",
-             delta=f"{s['beat'] / s['periods'] * 100:.0f}% of {unit}s", tone=tone_of(s['beat'] - s['periods'] / 2),
-             icon="🏁", accent=CYAN),
-        dict(label=f"Best {unit}", value=pct(s['best']['Alpha (%)']), delta=s['best']['Period'], tone="good",
-             icon="🚀", accent=GOOD),
-        dict(label=f"Worst {unit}", value=pct(s['worst']['Alpha (%)']), delta=s['worst']['Period'], tone="bad",
-             icon="🧯", accent=BAD),
-    ])
-    st.caption(f"{desc} vs {b_name}. Over the whole period the portfolio returned {pct(s['port_total'])} and "
-               f"{b_name} {pct(s['bench_total'])}.")
+def _fig_growth(g, b_name):
+    """Top: ₹100 in the portfolio vs ₹100 in the benchmark. Bottom: the gap between them."""
+    gap = (g['P'] - g['B']).round(2)
+    x = g.index.strftime('%Y-%m-%d')
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32], vertical_spacing=0.06)
+    fig.add_trace(go.Scatter(x=x, y=g['B'], name=b_name, mode='lines', line=dict(color=FAINT, width=1.6),
+                             hovertemplate=f"{b_name}: ₹%{{y:,.1f}}<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=g['P'], name="Portfolio", mode='lines', line=dict(color=PORTFOLIO, width=2.2),
+                             hovertemplate="Portfolio: ₹%{y:,.1f}<extra></extra>"), row=1, col=1)
+    fig.add_hline(y=100, line_color=FAINT, line_dash="dot", row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=gap.clip(lower=0), mode='lines', line=dict(width=0), fill='tozeroy',
+                             fillcolor=hex_rgba(GOOD, 0.35), hoverinfo='skip', showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x, y=gap.clip(upper=0), mode='lines', line=dict(width=0), fill='tozeroy',
+                             fillcolor=hex_rgba(BAD, 0.35), hoverinfo='skip', showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x, y=gap, mode='lines', line=dict(color=INK, width=1), name="Gap",
+                             showlegend=False, hovertemplate="Ahead by ₹%{y:+,.1f} (per ₹100)<extra></extra>"),
+                  row=2, col=1)
+    fig.add_hline(y=0, line_color=INK, line_dash="dash", line_width=1, row=2, col=1)
+    fig.update_layout(**PLOT_LAYOUT, height=CHART_H + 120, hovermode='x unified',
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                      margin=dict(l=12, r=12, t=30, b=12))
+    fig.update_yaxes(title_text="Value of ₹100", tickprefix="₹", row=1, col=1)
+    fig.update_yaxes(title_text="Gap (₹)", row=2, col=1)
+    return fig
 
-    # ---------- line graph: alpha in every period ----------
+
+def _fig_alpha_bars(t, b_name, unit):
     a = t['Alpha (%)'].round(2)
     custom = np.stack([t['Period'], t['Portfolio (%)'].round(2), t['Benchmark (%)'].round(2)], axis=1)
-    fig = go.Figure(go.Scatter(
-        x=t['To'].dt.strftime('%Y-%m-%d'), y=a, mode='lines+markers', name="Alpha",
-        line=dict(color=VIOLET, width=1.8),
-        marker=dict(size=7 if len(t) <= 120 else 5, color=[_sign_color(v) for v in a]),
-        customdata=custom,
-        hovertemplate="<b>%{customdata[0]}</b><br>alpha %{y:+.2f}%<br>portfolio %{customdata[1]:+.2f}% · "
+    fig = go.Figure(go.Bar(
+        x=t['To'].dt.strftime('%Y-%m-%d'), y=a, marker_color=[_sign_color(v) for v in a], marker_line_width=0,
+        customdata=custom, name="Alpha",
+        hovertemplate="<b>%{customdata[0]}</b><br>alpha <b>%{y:+.2f}%</b><br>portfolio %{customdata[1]:+.2f}% · "
                       + b_name + " %{customdata[2]:+.2f}%<extra></extra>"))
-    fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
-    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, title=f"Alpha each {unit} (portfolio return − {b_name} return)",
-                      showlegend=False, yaxis=dict(ticksuffix="%", title="Alpha"), hovermode='closest')
-    with panel():
-        _chart(fig, key="alpha_period_line")
-    st.caption(f"Each point is one {unit}: green = the portfolio beat {b_name} that {unit}, red = it did worse.")
+    fig.add_hline(y=0, line_color=INK, line_width=1)
+    fig.add_hline(y=float(a.mean()), line_color=VIOLET, line_dash="dash", line_width=1.6,
+                  annotation_text=f"average {a.mean():+.2f}% per {unit}", annotation_position="top left",
+                  annotation_font=dict(color=VIOLET, size=11), annotation_bgcolor="rgba(255,255,255,.85)")
+    fig.update_layout(**PLOT_LAYOUT, height=CHART_H, showlegend=False, bargap=0.12, hovermode='closest',
+                      yaxis=dict(ticksuffix="%", title="Alpha"), margin=dict(l=12, r=12, t=20, b=12))
+    return fig
 
-    # ---------- one table: yearly, half-yearly, quarterly, monthly and weekly alpha ----------
-    _alpha_table(tables, b_name, t.attrs.get('start', t['From'].iloc[0]))
+
+def _fig_rolling(r, b_name):
+    x = r.index.strftime('%Y-%m-%d')
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=r.clip(lower=0).round(2), mode='lines', line=dict(width=0), fill='tozeroy',
+                             fillcolor=hex_rgba(GOOD, 0.28), hoverinfo='skip', showlegend=False))
+    fig.add_trace(go.Scatter(x=x, y=r.clip(upper=0).round(2), mode='lines', line=dict(width=0), fill='tozeroy',
+                             fillcolor=hex_rgba(BAD, 0.28), hoverinfo='skip', showlegend=False))
+    fig.add_trace(go.Scatter(x=x, y=r.round(2), mode='lines', line=dict(color=INK, width=1.8), showlegend=False,
+                             hovertemplate="12 months to %{x|%b %Y}: <b>%{y:+.2f}%</b> vs " + b_name
+                                           + "<extra></extra>"))
+    fig.add_hline(y=0, line_color=INK, line_dash="dash", line_width=1)
+    fig.update_layout(**PLOT_LAYOUT, height=CHART_H - 40, hovermode='x unified',
+                      yaxis=dict(ticksuffix="%", title="1-year alpha"), margin=dict(l=12, r=12, t=20, b=12))
+    return fig
+
+
+def _fig_alpha_heatmap(monthly):
+    t = monthly[~monthly['Partial']] if (~monthly['Partial']).any() else monthly
+    grid = (pd.DataFrame({'Y': t['To'].dt.year, 'M': t['To'].dt.month, 'A': t['Alpha (%)']})
+            .pivot_table(index='Y', columns='M', values='A', aggfunc='sum').reindex(columns=range(1, 13)))
+    yearly = t.groupby(t['To'].dt.year).apply(
+        lambda d: ((1 + d['Portfolio (%)'] / 100).prod() - (1 + d['Benchmark (%)'] / 100).prod()) * 100)
+    grid[13] = yearly
+    z = grid.to_numpy(dtype=float)
+    lim = float(np.nanpercentile(np.abs(z[:, :12]), 95)) if np.isfinite(z[:, :12]).any() else 1.0
+    cols = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Year']
+    fig = go.Figure(go.Heatmap(
+        z=z, x=cols, y=[str(y) for y in grid.index], zmid=0, zmin=-lim, zmax=lim, xgap=2, ygap=2, showscale=False,
+        text=[["" if np.isnan(v) else f"{v:+.1f}" for v in row] for row in z], texttemplate="%{text}",
+        textfont=dict(size=10), colorscale=[[0, BAD], [0.5, "#FFFFFF"], [1, GOOD]],
+        hovertemplate="%{y} %{x}: alpha <b>%{z:+.2f}%</b><extra></extra>"))
+    fig.update_layout(**PLOT_LAYOUT, height=max(CHART_H, 26 * len(grid) + 60), margin=dict(l=12, r=12, t=10, b=12),
+                      yaxis=dict(autorange='reversed', type='category', showgrid=False),
+                      xaxis=dict(side='top', showgrid=False))
+    return fig
+
+
+def _fig_scatter(t, st_, b_name, unit, height):
+    p, b = t['Portfolio (%)'], t['Benchmark (%)']
+    lo, hi = float(min(p.min(), b.min())), float(max(p.max(), b.max()))
+    pad = (hi - lo) * 0.06
+    xs = np.array([lo - pad, hi + pad])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=xs, y=xs, mode='lines', line=dict(color=FAINT, dash='dot'), name="Same as benchmark",
+                             hoverinfo='skip'))
+    fig.add_trace(go.Scatter(x=xs, y=st_['alpha_period'] + st_['beta'] * xs, mode='lines',
+                             line=dict(color=VIOLET, width=2), name=f"Fit: β = {st_['beta']:.2f}", hoverinfo='skip'))
+    fig.add_trace(go.Scatter(
+        x=b.round(2), y=p.round(2), mode='markers', name=f"Each {unit}", customdata=t['Period'],
+        marker=dict(size=6 if len(t) > 80 else 8, color=[_sign_color(v) for v in t['Alpha (%)']], opacity=0.75,
+                    line=dict(color="#FFFFFF", width=0.6)),
+        hovertemplate="<b>%{customdata}</b><br>" + b_name + " %{x:+.2f}% → portfolio %{y:+.2f}%<extra></extra>"))
+    fig.add_hline(y=0, line_color=FAINT, line_width=1)
+    fig.add_vline(x=0, line_color=FAINT, line_width=1)
+    fig.update_layout(**PLOT_LAYOUT, height=height, hovermode='closest',
+                      xaxis=dict(title=f"{b_name} return", ticksuffix="%", range=list(xs)),
+                      yaxis=dict(title="Portfolio return", ticksuffix="%"),
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                      margin=dict(l=12, r=12, t=30, b=12))
+    return fig
+
+
+def _alpha_tab(asset_dfs, settings, strat):
+    w_norm = settings[0]
+    bench = strat['bench']
+    b_name = ASSET_SHORT[bench]
+    explain(f"Alpha = how much better (or worse) the portfolio did than {b_name}. Green = beat it, red = lagged. "
+            f"Strategy: {strat['desc']}. Strategy and benchmark are set in the sidebar.", AMBER)
+
+    tables = {f: _cached_alpha(asset_dfs, *settings, f) for f in ALPHA_FREQS}     # every frequency, cached
+    monthly = tables.get("Monthly")
+    growth = _cached_growth(asset_dfs, *settings)
+    if growth is None or monthly is None or monthly.empty:
+        note("Not enough price data for these dates. Pick a longer period in the sidebar.", AMBER, "⚠️")
+        return
+
+    # ---------- 1. headline: proper alpha numbers (monthly returns, the standard) ----------
+    ms = alpha_stats(monthly, "Monthly")
+    years_ = max((growth.index[-1] - growth.index[0]).days / 365.25, 0.01)
+    p_cagr = ((growth['P'].iloc[-1] / 100) ** (1 / years_) - 1) * 100
+    b_cagr = ((growth['B'].iloc[-1] / 100) ** (1 / years_) - 1) * 100
+    beat = int((monthly['Alpha (%)'] > 0).sum())
+    kpi_row([
+        dict(label="Extra return / yr", value=f"{p_cagr - b_cagr:+.2f}%",
+             delta=f"CAGR {p_cagr:.1f}% vs {b_cagr:.1f}%", tone=tone_of(p_cagr - b_cagr), icon="🎯",
+             accent=GOOD if p_cagr >= b_cagr else BAD),
+        dict(label="Jensen's alpha", value=pct(ms.get('alpha_ann', np.nan)),
+             delta="beta-adjusted", tone=tone_of(ms.get('alpha_ann')), icon="α", accent=VIOLET),
+        dict(label="Beta", value=f"{ms.get('beta', np.nan):.2f}",
+             delta=f"R² {ms.get('r2', np.nan):.2f}", icon="📐", accent=BLUE),
+        dict(label="Info ratio", value=f"{ms.get('info_ratio', np.nan):.2f}",
+             delta=f"tracking err {ms.get('tracking_error', np.nan):.1f}%", tone=tone_of(ms.get('info_ratio')),
+             icon="⚖️", accent=CYAN),
+        dict(label="Months won", value=f"{beat / len(monthly) * 100:.0f}%",
+             delta=f"{beat} of {len(monthly)} months", tone=tone_of(beat - len(monthly) / 2), icon="🏁",
+             accent=AMBER),
+    ])
+    st.caption("Jensen's alpha = yearly return the portfolio earned beyond what its beta (how strongly it follows "
+               f"{b_name}) explains. Beta 1 = moves like {b_name}; below 1 = calmer. Information ratio = extra "
+               "return per unit of extra risk (above 0.5 is good). Measured on monthly returns.")
+
+    # ---------- 2. growth of ₹100 + the gap ----------
+    section("Growth of ₹100", f"Portfolio vs {b_name}, and how far ahead (green) or behind (red) it is", "📈", INDIGO)
+    with panel():
+        _chart(_fig_growth(growth, b_name), key="alpha_growth")
+
+    # ---------- 3. alpha each period ----------
+    section("Alpha in each period", "Bars above 0 = the portfolio beat the benchmark in that period", "📊", AMBER)
+    with panel():
+        start_value("al_freq", "Monthly", list(ALPHA_FREQS))
+        freq = st.segmented_control("Alpha for every", list(ALPHA_FREQS), key="al_freq",
+                                    label_visibility="collapsed") or "Monthly"
+        t = tables[freq]
+        s = alpha_summary(t)
+        if not s:
+            note("Not enough data for this frequency.", AMBER, "⚠️")
+        else:
+            unit = ALPHA_FREQS[freq][0]
+            if freq == "Weekly" and ('SmallCap' in w_norm or bench == 'SmallCap'):
+                note("SmallCap prices may be <b>monthly</b>: weekly alpha then jumps once a month. "
+                     "Monthly or longer gives a cleaner picture.", AMBER, "💡")
+            _chart(_fig_alpha_bars(t, b_name, unit), key=f"alpha_bars_{freq}")
+            _mini_stats([
+                (f"{unit.capitalize()}s beating {b_name}", f"{s['beat']} of {s['periods']} "
+                                                            f"({s['beat'] / s['periods'] * 100:.0f}%)", GOOD),
+                (f"Average alpha per {unit}", f"{pct(s['avg'])}  (median {pct(s['median'])})", PORTFOLIO),
+                (f"Best {unit}", f"{pct(s['best']['Alpha (%)'])}  ({s['best']['Period']})", GOOD),
+                (f"Worst {unit}", f"{pct(s['worst']['Alpha (%)'])}  ({s['worst']['Period']})", BAD),
+            ])
+
+    # ---------- 4. rolling 1-year alpha ----------
+    roll = rolling_alpha(monthly, 12)
+    if not roll.empty:
+        section("Rolling 1-year alpha", f"Portfolio return over the last 12 months − {b_name} return over the same "
+                                        f"12 months", "🔁", VIOLET)
+        with panel():
+            _chart(_fig_rolling(roll, b_name), key="alpha_rolling")
+        st.caption(f"Positive {(roll > 0).mean() * 100:.0f}% of the time. Latest: {pct(roll.iloc[-1])} "
+                   f"(12 months to {roll.index[-1]:%b %Y}). Best {pct(roll.max())}, worst {pct(roll.min())}.")
+
+    # ---------- 5. month-by-month heatmap + scatter ----------
+    section("Where the alpha came from", "Alpha every month (left) and every month's returns side by side (right)",
+            "🧭", PINK)
+    up_c, down_c = ms.get('up_capture', np.nan), ms.get('down_capture', np.nan)
+    c1, c2 = st.columns([1.45, 1], gap="medium")
+    with c1, panel():
+        fig = _fig_alpha_heatmap(monthly)
+        _chart(fig, key="alpha_heatmap")
+        h = fig.layout.height
+    with c2, panel():
+        _chart(_fig_scatter(monthly, ms, b_name, "month", h - 150), key="alpha_scatter")
+        _mini_stats([
+            ("Up-market capture (higher = better)", f"{up_c:.0f}%", GOOD if up_c >= 100 else INK),
+            ("Down-market capture (lower = better)", f"{down_c:.0f}%", GOOD if down_c < 100 else BAD),
+        ])
+    st.caption(f"Heatmap: green month = beat {b_name}, red = lagged; 'Year' = full-year difference. "
+               f"Scatter: each dot is a month. Dots above the dotted line beat {b_name}. Up capture 90% = the "
+               f"portfolio gained 90% as much as {b_name} in its up months; down capture below 100% = it fell less "
+               f"in down months.")
+
+    # ---------- 6. full table ----------
+    section("Alpha table", "Every year, half-year, quarter, month and week", "📋", CYAN)
+    first = next((x for x in tables.values() if x is not None and not x.empty), None)
+    _alpha_table(tables, b_name, first.attrs.get('start', first['From'].iloc[0]))
 
 
 def _alpha_table(tables, b_name, start_day):
@@ -842,3 +1054,147 @@ def _data_tab(table, years, asset_dfs, w_norm, from_date, to_date, trading_only)
         _vs_assets_tab(table, asset_dfs, w_norm, from_date, to_date, years, trading_only)
     if on["home_show_table"]:
         _show_table(table)
+
+
+# =========================================================
+# Key performance: quantstats-style metrics + strategy returns per period
+# =========================================================
+_KPI_CSS = """<style>
+.qs-title { font-size:1.05rem; font-weight:800; color:#0F1B3D; margin:.1rem 0 .7rem 0; }
+.qs { width:100%; border-collapse:collapse; font-size:.9rem; margin:0; }
+.qs, .qs tr, .qs td, .qs th { border:none !important; }
+.qs thead th { background:#EEF1F7 !important; color:#0F1B3D; font-weight:800; padding:8px 6px; text-align:right; }
+.qs thead th:first-child { text-align:left; }
+.qs td { padding:4px 6px; color:#0F1B3D; white-space:nowrap; background:none !important; }
+.qs td.v { text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }
+.qs td.b { text-align:right; font-variant-numeric:tabular-nums; color:#64708A; }
+.qs td.neg { color:#B91C1C; }
+.qs tr.gap td { padding:0; height:9px; border-bottom:1px solid #D5DBE7 !important; }
+.qs tr.gap + tr td { padding-top:9px; }
+</style>"""
+
+_KPI_NO_TONE = {'rf', 'time_in_market', 'psr', 'vol', 'longest_dd', 'skew', 'kurt', 'start', 'end'}
+
+
+@st.cache_data(show_spinner="Calculating key performance...", max_entries=64)
+def _cached_kpi(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m, bench):
+    values = _cached_values(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m)
+    if values is None or len(values.dropna()) < 3:
+        return None
+    values = values.dropna()
+    values = values[~values.index.duplicated(keep='last')].sort_index()
+    b = benchmark_close(asset_dfs, bench)
+    b = b.reindex(b.index.union(values.index)).ffill().reindex(values.index).dropna()
+    rets = {f: (period_returns(values, rule) * 100, period_returns(b, rule) * 100) for f, rule in PERIODS.items()}
+    return ts_metrics(values), ts_metrics(b), rets
+
+
+def _kpi_table(pm, bm, b_name):
+    def td(m, key, kind, cls):
+        v = m.get(key)
+        neg = (" neg" if cls == "v" and key not in _KPI_NO_TONE and isinstance(v, (int, float))
+               and v == v and v < 0 else "")
+        return f'<td class="{cls}{neg}">{ts_fmt(v, kind)}</td>'
+
+    rows = []
+    for g, group in enumerate(KPI_LAYOUT):
+        if g:
+            rows.append('<tr class="gap"><td colspan="3"></td></tr>')
+        rows += [f"<tr><td>{label}</td>{td(pm, k, kind, 'v')}{td(bm, k, kind, 'b')}</tr>" for label, k, kind in group]
+    st.markdown(f'<div class="qs-title">Key Performance Metrics</div><table class="qs"><thead><tr><th>Metric</th>'
+                f'<th>Strategy</th><th>{b_name}</th></tr></thead><tbody>{"".join(rows)}</tbody></table>',
+                unsafe_allow_html=True)
+
+
+_QUARTER = {1: "Q1 (Jan–Mar)", 2: "Q2 (Apr–Jun)", 3: "Q3 (Jul–Sep)", 4: "Q4 (Oct–Dec)"}
+_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+
+def _heatmap(p, cols, col_of, height):
+    """Year (rows) x month/quarter (cols) grid of returns in %."""
+    t = pd.DataFrame({'Y': p.index.year, 'C': [col_of(d) for d in p.index], 'R': p.values})
+    grid = t.pivot(index='Y', columns='C', values='R').reindex(columns=cols)
+    z = grid.to_numpy(dtype=float)
+    lim = float(np.nanpercentile(np.abs(z), 95)) if np.isfinite(z).any() else 1.0
+    fig = go.Figure(go.Heatmap(
+        z=z, x=[c.split(" ")[0] for c in cols], y=[str(y) for y in grid.index],
+        text=[["" if np.isnan(v) else f"{v:+.1f}" for v in row] for row in z], texttemplate="%{text}",
+        textfont=dict(size=11), zmid=0, zmin=-lim, zmax=lim, xgap=2, ygap=2, showscale=False,
+        colorscale=[[0, BAD], [0.5, "#FFFFFF"], [1, GOOD]],
+        hovertemplate="%{y} %{x}: <b>%{z:+.2f}%</b><extra></extra>"))
+    fig.update_layout(**PLOT_LAYOUT, height=max(height, 28 * len(grid) + 60), margin=dict(l=12, r=12, t=10, b=12),
+                      yaxis=dict(autorange='reversed', type='category', showgrid=False),
+                      xaxis=dict(side='top', showgrid=False))
+    return fig
+
+
+def _period_bars(p, q, b_name, freq, height):
+    lab = (p.index.strftime('%d-%b-%y') if freq == "Weekly" else p.index.strftime('%Y'))
+    fig = go.Figure(go.Bar(
+        x=p.index.strftime('%Y-%m-%d'), y=p.round(2), marker_color=[_sign_color(v) for v in p], marker_line_width=0,
+        customdata=np.stack([lab, q.reindex(p.index).round(2)], axis=1),
+        text=[f"{v:+.1f}%" for v in p] if freq == "Yearly" else None, textposition='outside',
+        hovertemplate="<b>%{customdata[0]}</b><br>strategy %{y:+.2f}%<br>" + b_name
+                      + " %{customdata[1]:+.2f}%<extra></extra>"))
+    fig.add_hline(y=0, line_color=INK, line_dash="dash", line_width=1)
+    fig.update_layout(**PLOT_LAYOUT, height=height, showlegend=False, bargap=0.15, yaxis=dict(ticksuffix="%"),
+                      xaxis=dict(type='category' if freq == "Yearly" else 'date'),
+                      margin=dict(l=12, r=12, t=20, b=12))
+    return fig
+
+
+def _kpi_tab(asset_dfs, settings, strat):
+    st.markdown(_KPI_CSS, unsafe_allow_html=True)
+    amount, from_date = settings[1], settings[2]
+    b_name = ASSET_SHORT[strat['bench']]
+    res = _cached_kpi(asset_dfs, *settings)
+    if res is None:
+        note("Not enough price data for these dates. Pick a longer period in the sidebar.", AMBER, "⚠️")
+        return
+    pm, bm, rets = res
+    explain(f"One investment of {inr(amount)} on {from_date:%d-%m-%Y}, held with {strat['desc']}, "
+            f"next to {b_name}. Daily values, 252 trading days a year. Strategy and benchmark are in the sidebar.",
+            INDIGO)
+
+    left, right = st.columns([1, 1.45], gap="medium")
+    with left, panel():
+        _kpi_table(pm, bm, b_name)
+
+    with right, panel():
+        st.markdown('<div class="qs-title">Strategy returns</div>', unsafe_allow_html=True)
+        start_value("kpi_freq", "Monthly", list(PERIODS))
+        freq = st.segmented_control("Returns for every", list(PERIODS), key="kpi_freq",
+                                    label_visibility="collapsed") or "Monthly"
+        p, q = rets[freq]
+        p = p.dropna()
+        unit = {"Weekly": "week", "Monthly": "month", "Quarterly": "quarter", "Yearly": "year"}[freq]
+        if freq == "Monthly":
+            fig = _heatmap(p, _MONTHS, lambda d: _MONTHS[d.month - 1], CHART_H + 120)
+        elif freq == "Quarterly":
+            fig = _heatmap(p, list(_QUARTER.values()), lambda d: _QUARTER[(d.month - 1) // 3 + 1], CHART_H + 120)
+        else:
+            fig = _period_bars(p, q, b_name, freq, CHART_H + 120)
+        _chart(fig, key=f"kpi_ret_{freq}")
+        beat = int((p > q.reindex(p.index)).sum())
+        _mini_stats([
+            (f"Positive {unit}s", f"{(p > 0).mean() * 100:.0f}%  ({int((p > 0).sum())} of {len(p)})", GOOD),
+            (f"Average {unit}", pct(p.mean()), PORTFOLIO),
+            (f"Best {unit}", f"{pct(p.max())}  ({_plabel(p.idxmax(), freq)})", GOOD),
+            (f"Worst {unit}", f"{pct(p.min())}  ({_plabel(p.idxmin(), freq)})", BAD),
+            (f"{unit.capitalize()}s beating {b_name}", f"{beat} of {len(p)}", MUTED),
+        ])
+
+        csv = pd.DataFrame({'Period end': p.index.strftime('%d-%m-%Y'), 'Strategy (%)': p.round(4),
+                            f'{b_name} (%)': q.reindex(p.index).round(4)}).to_csv(index=False).encode('utf-8-sig')
+        st.download_button(f"⬇️  Download {freq.lower()} returns CSV", csv, key="dl_kpi_rets",
+                           file_name=f"strategy_{freq.lower()}_returns.csv", mime="text/csv")
+
+
+def _plabel(d, freq):
+    if freq == "Weekly":
+        return f"week to {d:%d-%m-%Y}"
+    if freq == "Monthly":
+        return f"{d:%b %Y}"
+    if freq == "Quarterly":
+        return f"Q{(d.month - 1) // 3 + 1} {d:%Y}"
+    return f"{d:%Y}"
