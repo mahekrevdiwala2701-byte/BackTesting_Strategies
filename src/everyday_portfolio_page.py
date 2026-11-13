@@ -108,6 +108,36 @@ def rolling_return(series: pd.Series, years: int) -> pd.Series:
     return pd.Series(np.where(ok, r * 100, np.nan), index=s.index)
 
 
+VOL_WEEKS = 52
+
+
+def weekly_log_std_at(series: pd.Series, dates, weeks: int = VOL_WEEKS) -> pd.DataFrame:
+    """Log-normal standard deviation of weekly returns at each date in `dates`.
+
+    For a date d (e.g. 15th) take the price on d, d−7, d−14, … d−7×weeks (53 prices for 52 weeks).
+    If one of those days was a holiday, the last trading day before it is used.
+    Weekly log return  r_k = ln(P(d−7(k−1)) / P(d−7k)),  k = 1…weeks
+    Weekly σ           = sample std dev (n−1) of those `weeks` log returns
+    Annualised σ       = weekly σ × √52
+    A date gets a value only if the full `weeks` look-back exists in the data."""
+    s = series.dropna().sort_index()
+    s = s[~s.index.duplicated(keep='last')]
+    s = s[s > 0]
+    dates = pd.DatetimeIndex(dates)
+    if len(s) < 2 or len(dates) == 0:
+        return pd.DataFrame({'Weekly σ (%)': np.nan, 'Annualised σ (%)': np.nan}, index=dates)
+    logp = np.log(s.to_numpy(dtype=float))
+    idx = s.index.values.astype('datetime64[ns]')
+    offsets = np.arange(weeks + 1) * np.timedelta64(7, 'D')            # 0, 7, 14, … 7×weeks days back
+    targets = dates.values.astype('datetime64[ns]')[:, None] - offsets[None, :]
+    pos = np.searchsorted(idx, targets.ravel(), side='right').reshape(targets.shape) - 1
+    ok = (pos >= 0).all(axis=1) & (dates.values <= idx[-1])             # no σ after this index's last price
+    lp = logp[np.clip(pos, 0, None)]                                      # log price at each weekly point
+    rets = lp[:, :-1] - lp[:, 1:]                                         # ln(P_newer / P_older)
+    sd = np.where(ok, rets.std(axis=1, ddof=1), np.nan)
+    return pd.DataFrame({'Weekly σ (%)': sd * 100, 'Annualised σ (%)': sd * np.sqrt(52) * 100}, index=dates)
+
+
 def value_one_year_ago(s: pd.Series, d: pd.Timestamp):
     past = s[s.index <= d - pd.DateOffset(years=1)]
     return past.iloc[-1] if not past.empty else np.nan
@@ -258,6 +288,7 @@ def render_everyday_portfolio_page(asset_dfs, fetch_errors):
         chart(fig, key="ep_chart")
 
     _rolling_section(asset_dfs, results, portfolio, start, end)
+    _volatility_section(asset_dfs, results, portfolio, start, end)
 
     # ---------------- Extras behind buttons ----------------
     section("Data & more", "Holding tables, year-end values and every day's numbers with CSV download", "📥", CYAN)
@@ -449,3 +480,47 @@ def _rolling_section(asset_dfs, results, portfolio, start, end):
         st.caption(f"Index rows use actual prices; the portfolio row uses your portfolio's value. "
                    f"{sum(len(v) for v in shown.values()):,} windows in total.")
     return {'series': series, 'label': win_label}
+
+
+# ---------------------------------------------------------
+# 52-week log standard deviation, stepped back 1 week at a time
+# ---------------------------------------------------------
+def _volatility_section(asset_dfs, results, portfolio, start, end):
+    section("52-week log standard deviation",
+            "One row per week: last date, then 1 week before, 2 weeks before … each from its own 52 weeks",
+            "📉", AMBER)
+    last = portfolio.index[-1]
+    s_ts = pd.Timestamp(start)
+    week_dates = []
+    d = last
+    while d >= s_ts:
+        week_dates.append(d)
+        d -= pd.Timedelta(days=7)
+    week_dates = pd.DatetimeIndex(week_dates)
+
+    table = pd.DataFrame(index=week_dates)
+    for a in results:
+        clean, _ = drop_glitches(asset_dfs[a].set_index('Date')['Close'])
+        v = weekly_log_std_at(clean, week_dates)
+        table[f"{ASSET_SHORT[a]} Weekly σ (%)"] = v['Weekly σ (%)']
+        table[f"{ASSET_SHORT[a]} Annualised σ (%)"] = v['Annualised σ (%)']
+    v = weekly_log_std_at(portfolio, week_dates)
+    table["Portfolio Weekly σ (%)"] = v['Weekly σ (%)']
+    table["Portfolio Annualised σ (%)"] = v['Annualised σ (%)']
+    table = table.dropna(how='all')
+
+    if table.empty:
+        note("Not enough history yet: each date needs 52 weeks (53 weekly prices) of data before it.", AMBER, "⏳")
+        return
+
+    show = table.copy()
+    show.insert(0, 'Week', range(len(show)))
+    show.insert(1, 'Date', show.index.strftime('%d-%m-%Y'))
+    st.dataframe(show.style.format({c: '{:.2f}%' for c in table.columns}, na_rep='—'),
+                 width="stretch", hide_index=True, height=420)
+
+    export = table.round(4).copy()
+    export.index = export.index.strftime('%Y-%m-%d')
+    export.index.name = 'Date'
+    st.download_button("⬇️  Download 52-week log σ table (CSV)", export.to_csv().encode('utf-8-sig'),
+                       file_name=f"weekly_log_std_{last:%Y%m%d}.csv", mime="text/csv", key="ep_vol_dl")
