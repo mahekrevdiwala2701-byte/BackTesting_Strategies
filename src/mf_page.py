@@ -22,6 +22,7 @@ import streamlit as st
 
 from src.ui import panel, hero, note, sidebar_nav, BAD, AMBER
 from src.data_loader import parse_dates
+from src.period_picker import LAST_DATE          # 15-10-2026: last date shown anywhere in the app
 
 MF_SHEET_ID = "1kTBWCUK0Sk4qESVATUitjr6KAgN0V3tnbprGl0KtK-g"          # MF_NAV_History
 MF_SHEET_LINK = f"https://docs.google.com/spreadsheets/d/{MF_SHEET_ID}/edit"
@@ -118,12 +119,12 @@ def load_mf_history():
 # Page: just the data, no sidebar
 # ---------------------------------------------------------
 def _table(full: pd.DataFrame, col: str) -> pd.DataFrame:
-    """Date down the side, one column per fund (Large → Mid → Small Cap), newest date first."""
+    """Date down the side (oldest first), one column per fund (Large → Mid → Small Cap)."""
     wide = full.pivot_table(index="Date", columns="Fund", values=col, aggfunc="last")
     rank = {"Large Cap": 0, "Mid Cap": 1, "Small Cap": 2}
     group_of = full.groupby("Fund")["Group"].first()
     cols = sorted(wide.columns, key=lambda f: (rank.get(group_of.get(f), 9), f))
-    wide = wide[cols].dropna(how="all").sort_index(ascending=False)
+    wide = wide[cols].dropna(how="all").sort_index()
     wide.index = wide.index.date
     wide.index.name = "Date"
     wide.columns.name = None
@@ -145,6 +146,28 @@ def render_mf_page(asset_dfs, fetch_errors):
     if source == "saved":
         note(f"Google Sheets couldn't be reached ({html.escape(str(err))}); showing the last copy downloaded.",
              AMBER, "⚠️")
+
+    # ---------------- date filter ----------------
+    # Calendar allows: oldest fund start → 15-10-2026.
+    # Default From = the day the LAST of the 18 funds started (first date on which every fund has a NAV).
+    first_day = full["Date"].min().date()
+    last_day = min(LAST_DATE, full["Date"].max().date())
+    starts = pd.concat([full.dropna(subset=[c]).groupby("Fund")["Date"].min() for c in ("NAV_Regular", "NAV_Direct")])
+    all_start = min(starts.max().date(), last_day)
+    youngest = starts.idxmax()
+    if "mf_from" not in st.session_state:
+        st.session_state["mf_from"], st.session_state["mf_to"] = all_start, last_day
+    with panel():
+        c1, c2, c3 = st.columns([1, 1, 2], vertical_alignment="bottom")
+        d_from = c1.date_input("📍 From date", min_value=first_day, max_value=last_day, format="DD-MM-YYYY",
+                               key="mf_from")
+        d_to = c2.date_input("🏁 To date", min_value=first_day, max_value=last_day, format="DD-MM-YYYY",
+                             key="mf_to")
+        c3.caption(f"Starts on **{all_start:%d %b %Y}**, when the last fund ({youngest}) began, so every fund has "
+                   f"data. You can go back to **{first_day:%d %b %Y}** (oldest fund).")
+    if d_from > d_to:
+        d_from, d_to = d_to, d_from
+    full = full[(full["Date"] >= pd.Timestamp(d_from)) & (full["Date"] <= pd.Timestamp(d_to))]
 
     t_reg, t_dir = st.tabs(["Regular plan · Growth", "Direct plan · Growth"])
     for tab, col, fname in ((t_reg, "NAV_Regular", "mf_nav_regular.csv"), (t_dir, "NAV_Direct", "mf_nav_direct.csv")):
