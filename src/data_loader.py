@@ -245,6 +245,6 @@ def get_available_datasets(directory: str = ".") -> dict:
         if os.path.exists(d):
             for filename in os.listdir(d):
                 if filename.endswith(".csv") and not filename.startswith("."):
-                    name = filename.replace("_data.csv", "").replace(".csv", "").replace("_", " ").title()
+                    name = filename.replace("_data.csv", "").replace(".cwsv", "").replace("_", " ").title()
                     datasets[name] = os.path.join(d, filename)
     return datasets

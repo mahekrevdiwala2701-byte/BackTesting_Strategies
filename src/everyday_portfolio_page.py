@@ -152,6 +152,98 @@ def pct(v):
 
 
 # ---------------------------------------------------------
+# Portfolio build (shared with the Main Dashboard Sharpe view)
+# ---------------------------------------------------------
+def build_everyday_portfolio(asset_dfs, weights, amount, start, end):
+    """weights: {asset: fraction, adds up to 1}. Returns (results by asset, holdings frame, portfolio series, notes)."""
+    results, notes = {}, []
+    for a in weights:
+        res = yoy_chain(asset_dfs[a].set_index('Date')['Close'], start, end)
+        if res.empty:
+            notes.append(f"<b>{ASSET_SHORT[a]}</b>: no data in this period, its share stays as cash.")
+            continue
+        if res.index[0].date() > start:
+            notes.append(f"<b>{ASSET_SHORT[a]}</b>: data starts {res.index[0]:%d-%m-%Y}, so its money is invested "
+                         f"from that day and its base year starts there.")
+        invested = amount * weights[a]
+        res['Holding (₹)'] = invested * res['Index Value'] / res['Index Value'].iloc[0]
+        results[a] = res
+    if not results:
+        return results, pd.DataFrame(), pd.Series(dtype=float), notes
+    all_dates = sorted(set().union(*[r.index for r in results.values()]))
+    holdings = pd.DataFrame(index=pd.DatetimeIndex(all_dates))
+    for a, res in results.items():
+        h = res['Holding (₹)'].reindex(holdings.index).ffill()
+        holdings[a] = h.fillna(amount * weights[a])          # before its data starts = cash
+    cash = amount * sum(w for a, w in weights.items() if a not in results)
+    portfolio = holdings.sum(axis=1) + cash
+    return results, holdings, portfolio, notes
+
+
+# ---------------------------------------------------------
+# Sharpe ratio for every day
+# ---------------------------------------------------------
+def rolling_return_at(series: pd.Series, dates, years: int = 1) -> pd.Series:
+    """Same as rolling_return, but at any dates: price(d) / price(d − `years`) − 1, in %.
+    A holiday uses the last trading day before it. Blank if d is after the last price or the look-back
+    starts before the first price."""
+    s = series.dropna().sort_index()
+    s = s[~s.index.duplicated(keep='last')]
+    dates = pd.DatetimeIndex(dates)
+    if s.empty or len(dates) == 0:
+        return pd.Series(np.nan, index=dates)
+    now = s.index.searchsorted(dates, side='right') - 1
+    back = s.index.searchsorted(dates - pd.DateOffset(years=years), side='right') - 1
+    ok = (now >= 0) & (back >= 0) & (dates <= s.index[-1])
+    v = s.to_numpy(dtype=float)
+    growth = v[np.clip(now, 0, None)] / v[np.clip(back, 0, None)]
+    r = growth ** (1 / years) - 1 if years > 1 else growth - 1
+    return pd.Series(np.where(ok, r * 100, np.nan), index=dates)
+
+
+def sharpe_at(series: pd.Series, dates, rf: float = 0.0) -> pd.DataFrame:
+    """Sharpe = (Rp − Rf) / σ at each date
+       Rp = rolling 1-year return (%)      (same as the Rolling returns section)
+       σ  = annualised 52-week log σ (%)   (same as the 52-week log σ table)
+       Rf = risk-free rate (% a year)
+    Pass every trading day for a daily series, or weekly dates for the weekly table."""
+    dates = pd.DatetimeIndex(dates)
+    rp = rolling_return_at(series, dates, 1)
+    sd = weekly_log_std_at(series, dates)['Annualised σ (%)']
+    sharpe = (rp - rf) / sd.where(sd > 0)
+    return pd.DataFrame({'Rolling 1Y Return (%)': rp, 'Annualised σ (%)': sd, 'Sharpe': sharpe}, index=dates)
+
+
+def sharpe_daily(series: pd.Series, rf: float = 0.0) -> pd.DataFrame:
+    """Sharpe ratio for every trading day of `series`."""
+    s = series.dropna().sort_index()
+    s = s[~s.index.duplicated(keep='last')]
+    return sharpe_at(s, s.index, rf).dropna()
+
+
+def sharpe_weekly(asset_dfs, results, portfolio, start, end, rf=0.0):
+    """Sharpe of every index (actual prices, glitches removed, full history for the look-back) and of the
+    portfolio, on the last date, 1 week before, 2 weeks before … Returns ({name: frame}, week dates)."""
+    weeks = week_dates_back(portfolio.index[-1], start)
+    weeks = weeks[weeks <= pd.Timestamp(end)]
+    out = {}
+    for a in results:
+        clean, _ = drop_glitches(asset_dfs[a].set_index('Date')['Close'])
+        out[ASSET_SHORT[a]] = sharpe_at(clean, weeks, rf).dropna(how='all')
+    out['Portfolio'] = sharpe_at(portfolio, weeks, rf).dropna(how='all')
+    return {k: v for k, v in out.items() if len(v)}, weeks
+
+
+def week_dates_back(last, start):
+    """last date, 1 week before, 2 weeks before … down to `start`."""
+    out, d, s_ts = [], pd.Timestamp(last), pd.Timestamp(start)
+    while d >= s_ts:
+        out.append(d)
+        d -= pd.Timedelta(days=7)
+    return pd.DatetimeIndex(out)
+
+
+# ---------------------------------------------------------
 # Page
 # ---------------------------------------------------------
 def render_everyday_portfolio_page(asset_dfs, fetch_errors):
@@ -204,31 +296,12 @@ def render_everyday_portfolio_page(asset_dfs, fetch_errors):
     weights = {a: w / total_w for a, w in raw_w.items() if w > 0}
 
     # ---------------- Calculate ----------------
-    results, notes = {}, []
-    for a in weights:
-        res = yoy_chain(asset_dfs[a].set_index('Date')['Close'], start, end)
-        if res.empty:
-            notes.append(f"<b>{ASSET_SHORT[a]}</b>: no data in this period, its share stays as cash.")
-            continue
-        if res.index[0].date() > start:
-            notes.append(f"<b>{ASSET_SHORT[a]}</b>: data starts {res.index[0]:%d-%m-%Y}, so its money is invested "
-                         f"from that day and its base year starts there.")
-        invested = amount * weights[a]
-        res['Holding (₹)'] = invested * res['Index Value'] / res['Index Value'].iloc[0]
-        results[a] = res
+    results, holdings, portfolio, notes = build_everyday_portfolio(asset_dfs, weights, amount, start, end)
     for n in notes:
         note(n, BLUE)
     if not results:
         note("No data to show for the selected dates.", AMBER, "⚠️")
         return
-
-    all_dates = sorted(set().union(*[r.index for r in results.values()]))
-    holdings = pd.DataFrame(index=pd.DatetimeIndex(all_dates))
-    for a, res in results.items():
-        h = res['Holding (₹)'].reindex(holdings.index).ffill()
-        holdings[a] = h.fillna(amount * weights[a])          # before its data starts = cash
-    cash = amount * sum(w for a, w in weights.items() if a not in results)
-    portfolio = holdings.sum(axis=1) + cash
 
     # ---------------- Cards ----------------
     last_d = portfolio.index[-1]
@@ -491,12 +564,7 @@ def _volatility_section(asset_dfs, results, portfolio, start, end):
             "📉", AMBER)
     last = portfolio.index[-1]
     s_ts = pd.Timestamp(start)
-    week_dates = []
-    d = last
-    while d >= s_ts:
-        week_dates.append(d)
-        d -= pd.Timedelta(days=7)
-    week_dates = pd.DatetimeIndex(week_dates)
+    week_dates = week_dates_back(last, s_ts)
 
     table = pd.DataFrame(index=week_dates)
     for a in results:

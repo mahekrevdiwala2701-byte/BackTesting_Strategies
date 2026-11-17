@@ -35,6 +35,7 @@ from src.alpha import (calculated_investment_values, benchmark_close, period_alp
                        FREQUENCIES as ALPHA_FREQS)
 from src.strategies import STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS
 from src.drawdown import underwater, drawdown_periods, drawdown_summary
+from src.everyday_portfolio_page import build_everyday_portfolio, sharpe_weekly
 from src.tearsheet import metrics as ts_metrics, period_returns, PERIODS, LAYOUT as KPI_LAYOUT, fmt as ts_fmt
 
 DEFAULT_START = date(2010, 1, 1)
@@ -129,6 +130,15 @@ def _cached_alpha(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, l
     return period_alpha(values, benchmark_close(asset_dfs, bench), freq)
 
 
+@st.cache_data(show_spinner="Calculating Sharpe ratio...", max_entries=32)
+def _cached_sharpe(asset_dfs, w_norm, amount, from_date, to_date, rf):
+    """Sharpe for every index and the portfolio on the last date, 1 week before, 2 weeks before …"""
+    results, _, portfolio, _ = build_everyday_portfolio(asset_dfs, w_norm, amount, from_date, to_date)
+    if not results:
+        return {}, pd.DatetimeIndex([])
+    return sharpe_weekly(asset_dfs, results, portfolio, from_date, to_date, rf)
+
+
 @st.cache_data(show_spinner="Calculating drawdowns...", max_entries=64)
 def _cached_drawdown(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m, bench):
     values = _cached_values(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, look_m)
@@ -146,6 +156,8 @@ def _cached_drawdown(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m
 VIEWS = {                       # key -> (button label, section title, subtitle, icon, colour)
     "spread":   ("🔔 Return spread",  "Return spread",  "How often each return happened", "🔔", PINK),
     "timeline": ("📈 Return timeline", "Return timeline", "Return for every investment date", "📈", VIOLET),
+    "sharpe":   ("⚖️ Sharpe ratio",   "Sharpe ratio",
+                 "(Rolling 1-year return − risk-free) ÷ 52-week annualised log σ, shown every week", "⚖️", GOOD),
     "drawdown": ("🌊 Drawdown",       "Drawdown (underwater plot)",
                  "How far below its previous high the portfolio was, every day", "🌊", BLUE),
     "alpha":    ("🎯 Alpha",          "Alpha", "How much the portfolio beat the benchmark each period", "🎯", AMBER),
@@ -258,6 +270,8 @@ def render_home_page(asset_dfs, fetch_errors):
         _bell_tab(table, stats, years)
     elif view == "timeline":
         _line_tab(table, years)
+    elif view == "sharpe":
+        _sharpe_tab(asset_dfs, w_norm, amount, from_date, to_date)
     elif view == "drawdown":
         _drawdown_tab(asset_dfs, settings, strat)
     elif view == "alpha":
@@ -1198,3 +1212,76 @@ def _plabel(d, freq):
     if freq == "Quarterly":
         return f"Q{(d.month - 1) // 3 + 1} {d:%Y}"
     return f"{d:%Y}"
+
+
+# =========================================================
+# Sharpe ratio (weekly points of a daily calculation)
+# =========================================================
+def _sharpe_tab(asset_dfs, w_norm, amount, from_date, to_date):
+    rf = st.number_input("Risk-free rate (% a year)", min_value=0.0, max_value=20.0, value=0.0, step=0.25,
+                         format="%.2f", key="sh_rf")
+    weekly, weeks = _cached_sharpe(asset_dfs, w_norm, amount, from_date, to_date, rf)
+    if not weekly:
+        note("Not enough history yet: the Sharpe ratio needs 1 year of returns and 52 weeks of prices "
+             "before each date.", AMBER, "⏳")
+        return
+
+    port_color = {**{ASSET_SHORT[a]: COLORS[a] for a in ASSETS}, 'Portfolio': PORTFOLIO}
+    names = list(weekly)
+    main = 'Portfolio' if 'Portfolio' in weekly else names[0]
+
+    # ---------------- Timeline chart ----------------
+    fig = go.Figure()
+    m = weekly[main].sort_index()
+    xs = m.index.strftime('%Y-%m-%d')
+    y = m['Sharpe'].round(3)
+    for vals, color in ((y.clip(lower=0), hex_rgba(GOOD, 0.22)), (y.clip(upper=0), hex_rgba(BAD, 0.25))):
+        fig.add_trace(go.Scatter(x=xs, y=vals, mode='lines', line=dict(width=0), fill='tozeroy',
+                                 fillcolor=color, hoverinfo='skip', showlegend=False))
+    fig.add_trace(go.Scatter(
+        x=xs, y=y, mode='lines+markers', name=f"{main} Sharpe", marker=dict(size=3),
+        line=dict(color=port_color.get(main, PORTFOLIO), width=1.8),
+        customdata=np.stack([m.index.strftime('%d-%m-%Y'), m['Rolling 1Y Return (%)'].round(2),
+                             m['Annualised σ (%)'].round(2)], axis=1),
+        hovertemplate="%{customdata[0]}<br>Rp %{customdata[1]:+.2f}% · σ %{customdata[2]:.2f}%<br>"
+                      "<b>Sharpe %{y:.2f}</b><extra>" + main + "</extra>"))
+    for k in names:
+        if k == main:
+            continue
+        v = weekly[k].sort_index()
+        fig.add_trace(go.Scatter(x=v.index.strftime('%Y-%m-%d'), y=v['Sharpe'].round(3), mode='lines', name=k,
+                                 line=dict(color=port_color.get(k, MUTED), width=1.3), visible='legendonly',
+                                 hovertemplate="<b>%{y:.2f}</b><extra>" + k + "</extra>"))
+    fig.add_hline(y=0, line_color=FAINT, line_dash="dot")
+    fig.add_hline(y=y.mean(), line_color=VIOLET, line_dash="dash",
+                  annotation_text=f"average {y.mean():.2f}", annotation_position="top left",
+                  annotation_font=dict(color=VIOLET, size=11))
+    fig.update_layout(**PLOT_LAYOUT, height=CHART_H + 30, hovermode='x unified',
+                      title=f"{main}: Sharpe ratio every week (risk-free {rf:.2f}%)",
+                      yaxis=dict(title="Sharpe ratio"),
+                      xaxis=dict(rangeslider=dict(visible=True, thickness=0.05)),
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0.45))
+    with panel():
+        _chart(fig, key="sh_line")
+    st.caption("Green = Sharpe above 0, red = below 0. Click an index in the legend to add its line. "
+               "Drag the slider under the chart to zoom.")
+
+    # ---------------- Weekly table ----------------
+    table = pd.DataFrame(index=weeks)
+    for k in names:
+        w = weekly[k].reindex(weeks)
+        table[f"{k} Rp 1Y (%)"] = w['Rolling 1Y Return (%)']
+        table[f"{k} σ (%)"] = w['Annualised σ (%)']
+        table[f"{k} Sharpe"] = w['Sharpe']
+    table = table.dropna(how='all')
+    show = table.copy()
+    show.insert(0, 'Week', range(len(show)))
+    show.insert(1, 'Date', show.index.strftime('%d-%m-%Y'))
+    fmt = {c: ('{:+.2f}%' if 'Rp' in c else '{:.2f}%' if 'σ' in c else '{:.2f}') for c in table.columns}
+    st.dataframe(show.style.format(fmt, na_rep='—'), width="stretch", hide_index=True, height=CHART_H)
+
+    export = table.round(4).copy()
+    export.index = export.index.strftime('%Y-%m-%d')
+    export.index.name = 'Date'
+    st.download_button("⬇️  Download weekly Sharpe table (CSV)", export.to_csv().encode('utf-8-sig'),
+                       file_name=f"weekly_sharpe_{weeks[0]:%Y%m%d}.csv", mime="text/csv", key="sh_dl")

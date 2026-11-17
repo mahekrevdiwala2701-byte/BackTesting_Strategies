@@ -21,6 +21,7 @@ from src.home_page import render_home_page  # noqa: E402
 from src.investment_page import render_investment_page  # noqa: E402
 from src.monte_carlo_page import render_monte_carlo_page  # noqa: E402
 from src.everyday_portfolio_page import render_everyday_portfolio_page  # noqa: E402
+from src.mf_page import render_mf_page  # noqa: E402
 
 apply_custom_css()
 st.session_state["_panel_n"] = 0      # panel() numbering starts fresh every run
@@ -65,6 +66,7 @@ PAGES = {
     "invest": render_investment_page,
     "montecarlo": render_monte_carlo_page,
     "portfolio": render_everyday_portfolio_page,
+    "mf": render_mf_page,                  # 📊 Mutual Funds (MF_NAV_Data Google Sheet)
 }
 
 view = st.session_state.get("view", "home")
