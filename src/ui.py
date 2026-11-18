@@ -60,7 +60,7 @@ GOOD_BG = "#E8F7EE"
 BAD_BG = "#FDECEC"
 
 # Banner colours (the same on every page, so the app feels like one product)
-GRADIENTS = {k: (NAVY, NAVY_2) for k in ("home", "invest", "montecarlo", "portfolio", "mf", "recovery")}
+GRADIENTS = {k: (NAVY, NAVY_2) for k in ("home", "invest", "montecarlo", "portfolio", "mf")}
 
 # One colour per strategy (same on the Investment and Monte Carlo pages)
 STRAT_COLORS = {"bh": CYAN, "periodic": VIOLET, "diff": ORANGE}
@@ -72,7 +72,6 @@ PAGES = {
     "montecarlo": ("🎲", "Monte Carlo", ACCENT),
     "portfolio": ("💼", "Everyday Portfolio", ACCENT),
     "mf": ("📊", "Mutual Funds", ACCENT),
-    "recovery": ("⛰️", "MF Recovery", ACCENT),
 }
 
 

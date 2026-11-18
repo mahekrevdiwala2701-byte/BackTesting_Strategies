@@ -1,10 +1,11 @@
 """⛰️ MF Recovery page: when a mutual fund falls, how long does it take to get back to its old high?
 
-Three parts, top to bottom:
+Parts, top to bottom:
   1. "How to read" strip: Top → Bottom → Back at the top
-  2. ONE FUND: pick a fund and one of its falls → story cards + a big annotated NAV chart
+  2. LARGE vs MID vs SMALL CAP: averages per category, for every crash and over the whole history
+  3. ONE FUND: pick a fund and one of its falls → story cards + a big annotated NAV chart
      + a timeline of all its big falls (red = falling, green = climbing back)
-  3. ALL FUNDS on the SAME crash (2008, COVID 2020, ...): who got back to the top fastest?
+  4. ALL FUNDS on the SAME crash (2008, COVID 2020, ...): who got back to the top fastest?
 
 All the maths is in src/mf_recovery.py (plain pandas, every step explained there).
 """
@@ -16,10 +17,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.ui import (panel, hero, note, section, kpi_row, chart, steps, sidebar_nav, PLOT_LAYOUT,
+from src.ui import (panel, hero, note, section, kpi, kpi_row, chart, steps, sidebar_nav, PLOT_LAYOUT,
                     BAD, GOOD, AMBER, INDIGO, TEAL, ORANGE, VIOLET, EMERALD, FAINT, hex_rgba)
 from src.mf_page import load_mf_history, MF_SHEET_LINK, CATEGORIES, CAT_COLORS
-from src.mf_recovery import daily_steps, falls, as_years_months, CRASHES, fall_in_window
+from src.mf_recovery import (daily_steps, falls, as_years_months, CRASHES, fall_in_window, crash_table,
+                              category_crash_summary, category_history_summary)
 
 FALL_C, RISE_C, TOP_C = "#DC2626", "#16A34A", "#2563EB"
 
@@ -123,6 +125,145 @@ def _race(t: pd.DataFrame, key: str):
 
 
 # ---------------------------------------------------------
+# Category averages (Large / Mid / Small Cap)
+# ---------------------------------------------------------
+CAT_ICON = {"Large Cap": "🔵", "Mid Cap": "🟠", "Small Cap": "🟢"}
+
+
+@st.cache_data(show_spinner="Grouping every fall by category...", max_entries=8)
+def _grouped(full: pd.DataFrame, nav_col: str):
+    ct = crash_table(full, nav_col)
+    cs = category_crash_summary(ct) if not ct.empty else pd.DataFrame()
+    hist, per = category_history_summary(full, nav_col, 10.0)
+    return ct, cs, hist, per
+
+
+def _months(days):
+    return np.round(np.asarray(days, dtype=float) / 30.4375, 1)
+
+
+def _cat_bars(cs: pd.DataFrame, value_col: str, title: str, unit: str, key: str):
+    """Grouped bars: one group per crash, one bar per category."""
+    crashes = [c for c in CRASHES if c in set(cs["Crash"])]
+    fig = go.Figure()
+    for cat in CATEGORIES:
+        d = cs[cs["Category"] == cat].set_index("Crash").reindex(crashes)
+        if unit == "months":
+            y = _months(d[value_col])
+            text = [as_years_months(v) if pd.notna(v) else "" for v in d[value_col]]
+        else:
+            y = d[value_col].round(1)
+            text = [f"{v:.0f}%" if pd.notna(v) else "" for v in d[value_col]]
+        fig.add_trace(go.Bar(x=[c.replace(" ", "<br>", 1) for c in crashes], y=y, name=cat, marker_color=CAT_COLORS[cat],
+                             text=text, textposition="outside", cliponaxis=False,
+                             customdata=d["Funds"].fillna(0).astype(int),
+                             hovertemplate=f"<b>{cat}</b> · %{{x}}<br>%{{text}} (average of %{{customdata}} funds)"
+                                           "<extra></extra>"))
+    fig.update_layout(**PLOT_LAYOUT, barmode="group", height=430, bargap=0.25,
+                      title=dict(text=title, x=0.01, xanchor="left"),
+                      yaxis=dict(title="Months" if unit == "months" else "Fall (%)",
+                                 ticksuffix="" if unit == "months" else "%"),
+                      xaxis=dict(tickangle=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.55),
+                      margin=dict(l=12, r=12, t=70, b=12))
+    chart(fig, key=key)
+
+
+def _cat_cards(cs: pd.DataFrame, crash: str):
+    """Three columns (Large / Mid / Small Cap) of cards for one crash."""
+    cols = st.columns(3, gap="medium")
+    for col, cat in zip(cols, CATEGORIES):
+        with col:
+            st.markdown(f"#### {CAT_ICON[cat]} {cat}")
+            row = cs[(cs["Category"] == cat) & (cs["Crash"] == crash)]
+            if row.empty:
+                note("No fund of this category has data for this crash.", AMBER, "💡")
+                continue
+            r = row.iloc[0]
+            kpi("Average fall", f"{r['Avg fall (%)']:.1f}%", f"worst {r['Worst fall (%)']:.1f}% · {r['Funds']} funds",
+                tone="bad", icon="🔻", accent=FALL_C)
+            kpi("Average time falling", as_years_months(r["Avg days falling"]),
+                f"{r['Avg days falling']:,.0f} days, top → bottom", icon="⬇️", accent=ORANGE)
+            kpi("Average time back to the top",
+                as_years_months(r["Avg days bottom → top"]) if pd.notna(r["Avg days bottom → top"]) else "not yet",
+                f"{r['Recovered']} of {r['Funds']} funds back at the top", tone="good", icon="⏱️", accent=RISE_C)
+            kpi("Fastest", as_years_months(r["Fastest days"]) if r["Fastest"] else "—",
+                (r["Fastest"] or "none yet")[:38], tone="good", icon="🚀", accent=EMERALD)
+            kpi("Slowest", as_years_months(r["Slowest days"]) + ("" if r["Slowest recovered"] else " (not yet)"),
+                r["Slowest"][:38], tone="bad", icon="🐢", accent=BAD)
+
+
+def render_categories(full: pd.DataFrame, nav_col: str, plan: str):
+    section("Large vs Mid vs Small Cap", "Averages of all funds in each category · the same crash for everyone",
+            "🧮", INDIGO)
+    ct, cs, hist, per = _grouped(full, nav_col)
+    if cs.empty:
+        note("Not enough NAV history to compare the categories.", AMBER, "⏳")
+        return
+    c1, c2 = st.columns(2, gap="medium")
+    with c1, panel():
+        _cat_bars(cs, "Avg days bottom → top", "⏱️ Average time to get back to the top", "months", "rec_cat_time")
+    with c2, panel():
+        _cat_bars(cs, "Avg fall (%)", "🔻 Average fall", "pct", "rec_cat_fall")
+    st.caption("Each bar = the average of all funds of that category for that crash (hover to see how many funds). "
+               "Recovery time = days from the bottom back to the old top, averaged over the funds that are back. "
+               "2008: most Small Cap funds were not launched yet. A fund that was still below an earlier top when a "
+               "crash came has no separate fall for that crash, so it counts in the earlier one instead.")
+
+    with panel():
+        crashes = [c for c in CRASHES if c in set(cs["Crash"])]
+        crash = st.segmented_control("Look at one crash", crashes, key="rec_cat_crash",
+                                     default="COVID crash 2020" if "COVID crash 2020" in crashes else crashes[0]) \
+            or crashes[0]
+        _cat_cards(cs, crash)
+
+    section("Over the whole history", "Every fall of 10% or more since each fund started, averaged per category",
+            "📚", TEAL)
+    cols = st.columns(3, gap="medium")
+    for col, cat in zip(cols, CATEGORIES):
+        with col:
+            st.markdown(f"#### {CAT_ICON[cat]} {cat}")
+            row = hist[hist["Category"] == cat]
+            if row.empty:
+                continue
+            h = row.iloc[0]
+            kpi("Falls of 10%+ every 10 years", f"{h['Avg falls per 10 years']:.1f}",
+                f"average of {h['Funds']} funds · {h['Avg years of data']:.0f} yrs of data each", icon="🔁", accent=VIOLET)
+            kpi("Average deepest fall", f"{h['Avg deepest fall (%)']:.1f}%", "each fund's worst fall, averaged",
+                tone="bad", icon="📉", accent=FALL_C)
+            kpi("Average time back to the top", as_years_months(h["Avg days bottom → top"]),
+                f"{h['Avg days bottom → top']:,.0f} days, falls of 10%+", tone="good", icon="⏱️", accent=RISE_C)
+            kpi("Average longest wait", as_years_months(h["Avg longest days bottom → top"]),
+                "each fund's slowest recovery, averaged", tone="bad", icon="🐢", accent=ORANGE)
+            kpi("Today, below the top", f"{h['Avg now below top (%)']:.1f}%", "average of the funds right now",
+                tone="bad" if h["Avg now below top (%)"] < -1 else "good", icon="📍", accent=INDIGO)
+    st.caption("Funds started in different years, so this part uses each fund's own history. The crash charts above "
+               "are the fairer comparison (same fall, same dates).")
+
+    with st.expander("📋 See all category numbers and download them"):
+        t = cs.copy()
+        t["Category"] = pd.Categorical(t["Category"], CATEGORIES, ordered=True)
+        t["Crash"] = pd.Categorical(t["Crash"], list(CRASHES), ordered=True)
+        t = t.sort_values(["Crash", "Category"])
+        view = pd.DataFrame({
+            "Crash": t["Crash"].astype(str), "Category": t["Category"].astype(str), "Funds": t["Funds"],
+            "Avg fall": t["Avg fall (%)"], "Worst fall": t["Worst fall (%)"],
+            "Avg time falling": [as_years_months(d) for d in t["Avg days falling"]],
+            "Avg time back to top": [as_years_months(d) if pd.notna(d) else "not yet" for d in t["Avg days bottom → top"]],
+            "Avg days back to top": t["Avg days bottom → top"],
+            "Back at top": [f"{a} of {b}" for a, b in zip(t["Recovered"], t["Funds"])],
+            "Fastest fund": t["Fastest"], "Slowest fund": t["Slowest"]})
+        st.dataframe(view.style.format({"Avg fall": "{:.1f}%", "Worst fall": "{:.1f}%", "Avg days back to top": "{:,.0f}"},
+                                       na_rep="—"), hide_index=True, width="stretch")
+        c1, c2, c3 = st.columns(3)
+        c1.download_button("⬇️  Category averages per crash", view.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"recovery_by_category_{plan.lower()}.csv", key="rec_dl_cat")
+        c2.download_button("⬇️  Every fund, every crash", ct.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"recovery_every_fund_every_crash_{plan.lower()}.csv", key="rec_dl_ct")
+        c3.download_button("⬇️  Whole-history numbers per fund", per.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"recovery_history_per_fund_{plan.lower()}.csv", key="rec_dl_per")
+
+
+# ---------------------------------------------------------
 # Page
 # ---------------------------------------------------------
 def render_mf_recovery_page(asset_dfs, fetch_errors):
@@ -147,14 +288,20 @@ def render_mf_recovery_page(asset_dfs, fetch_errors):
     ])
 
     with panel():
-        c1, c2, c3 = st.columns([1, 2.2, 1], vertical_alignment="bottom")
+        plan = st.segmented_control("Plan", ["Regular", "Direct"], default="Regular", key="rec_plan") or "Regular"
+    nav_col = "NAV_Regular" if plan == "Regular" else "NAV_Direct"
+
+    # =========================== 0. BY CATEGORY (averages) ===========================
+    render_categories(full, nav_col, plan)
+
+    section("Fund by fund", "Want the detail? Pick one fund below", "🔍", VIOLET)
+    with panel():
+        c1, c2 = st.columns([1, 2.2], vertical_alignment="bottom")
         cat = c1.selectbox("Category", CATEGORIES, key="rec_cat")
         pool = sorted(full.loc[full["Group"] == cat, "Fund"].unique())
         if st.session_state.get("rec_fund") not in pool:
             st.session_state["rec_fund"] = pool[0]
         fund = c2.selectbox("Fund", pool, key="rec_fund")
-        plan = c3.segmented_control("Plan", ["Regular", "Direct"], default="Regular", key="rec_plan") or "Regular"
-    nav_col = "NAV_Regular" if plan == "Regular" else "NAV_Direct"
 
     # =========================== 1. ONE FUND ===========================
     s, f_all = _fund_data(full, fund, nav_col)
@@ -162,8 +309,9 @@ def render_mf_recovery_page(asset_dfs, fetch_errors):
     if s.empty or big.empty:
         note(f"{fund} has no fall of 10% or more in its {plan} NAV history.", AMBER, "💡")
         return
-    section(f"{fund}", f"{plan} plan · NAV from {_d(s['Date'].iloc[0])} to {_d(s['Date'].iloc[-1])} · "
-                       f"{len(big)} falls of 10% or more", "📉", CAT_COLORS.get(cat, INDIGO))
+    st.markdown(f"### {fund}")
+    st.caption(f"{plan} plan · NAV from {_d(s['Date'].iloc[0])} to {_d(s['Date'].iloc[-1])} · "
+                       f"{len(big)} falls of 10% or more")
     order = big.sort_values("Fall (%)").index.tolist()                    # deepest first
     with panel():
         pick = st.selectbox("Pick a fall (deepest first)", order, key=f"rec_pick_{fund}_{plan}",
