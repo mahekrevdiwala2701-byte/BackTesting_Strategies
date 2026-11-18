@@ -30,6 +30,7 @@ from src.everyday_portfolio_page import (drop_glitches, sharpe_at, rolling_retur
                                          VOL_WEEKS)
 from src.ui import hex_rgba, GOOD, FAINT
 from src.data_loader import parse_dates
+from src.mf_recovery import daily_steps, falls, fund_summary, as_years_months
 from src.period_picker import LAST_DATE          # 15-10-2026: last date shown anywhere in the app
 
 MF_SHEET_ID = "1kTBWCUK0Sk4qESVATUitjr6KAgN0V3tnbprGl0KtK-g"          # MF_NAV_History
@@ -458,6 +459,194 @@ def render_weekly(full: pd.DataFrame, asset_dfs: dict, d_from, d_to, plan: str, 
 
 
 # ---------------------------------------------------------
+# Recovery time: bottom → back to the old top (calculation in src/mf_recovery.py)
+# ---------------------------------------------------------
+_REC_RED, _REC_GREEN = "#DC2626", "#059669"
+
+
+def _recovery_bars(t: pd.DataFrame, key: str):
+    """Days from the bottom of each fund's biggest fall back to its old top. Hatched = not recovered yet."""
+    t = t.sort_values("Days bottom → top")
+    colors = [CAT_COLORS.get(str(c), VIOLET) for c in t["Category"]]
+    labels = [f"{as_years_months(d)}{'' if r else ' · not yet'}  ({f:.0f}%)"
+              for d, r, f in zip(t["Days bottom → top"], t["Recovered"], t["Biggest fall (%)"])]
+    custom = np.stack([t["Bottom date"].dt.strftime("%d-%m-%Y"),
+                       t["Recovery date"].dt.strftime("%d-%m-%Y").fillna("not yet"),
+                       t["Biggest fall (%)"].round(1), t["Top date"].dt.strftime("%d-%m-%Y")], axis=1)
+    fig = go.Figure(go.Bar(
+        x=t["Days bottom → top"], y=t["Fund"], orientation="h", marker_color=colors,
+        marker_pattern_shape=["" if r else "/" for r in t["Recovered"]],
+        text=labels, textposition="outside", cliponaxis=False, customdata=custom,
+        hovertemplate="<b>%{y}</b><br>Top %{customdata[3]} → bottom %{customdata[0]} (%{customdata[2]}%)"
+                      "<br>Back to the top: %{customdata[1]}<br><b>%{x:,} days bottom → top</b><extra></extra>"))
+    fig.update_layout(**PLOT_LAYOUT, height=max(320, 34 * len(t) + 90), showlegend=False,
+                      xaxis=dict(title="Days from the bottom back to the old top"),
+                      margin=dict(l=10, r=150, t=20, b=10))
+    chart(fig, key=key)
+
+
+def _recovery_fund_chart(steps: pd.DataFrame, f: pd.DataFrame, fund: str, key: str):
+    """Top: NAV and its running top. Bottom: fall from top (%), with top / bottom / recovery of each big fall."""
+    x = steps["Date"].dt.strftime("%Y-%m-%d")
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.55, 0.45], vertical_spacing=0.05)
+    fig.add_trace(go.Scatter(x=x, y=steps["Running top"], name="Running top (highest NAV so far)", mode="lines",
+                             line=dict(color=FAINT, width=1.4, dash="dot"),
+                             hovertemplate="Top so far ₹%{y:,.2f}<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=steps["NAV"], name="NAV", mode="lines", line=dict(color=INDIGO, width=1.8),
+                             hovertemplate="NAV ₹%{y:,.2f}<extra></extra>"), row=1, col=1)
+    dd = steps["Fall from top (%)"].round(2)
+    fig.add_trace(go.Scatter(x=x, y=dd, name="Fall from top", mode="lines", fill="tozeroy",
+                             line=dict(color=_REC_RED, width=1), fillcolor=hex_rgba(BAD, 0.25),
+                             hovertemplate="Below top: %{y:.2f}%<extra></extra>", showlegend=False), row=2, col=1)
+    for _, r in f.iterrows():                                  # shade top → recovery, mark the bottom
+        x1 = r["Recovery date"] if r["Recovered"] else steps["Date"].iloc[-1]
+        fig.add_vrect(x0=r["Top date"].strftime("%Y-%m-%d"), x1=x1.strftime("%Y-%m-%d"),
+                      fillcolor=hex_rgba(AMBER, 0.10), line_width=0, layer="below")
+        fig.add_trace(go.Scatter(
+            x=[r["Bottom date"].strftime("%Y-%m-%d")], y=[r["Fall (%)"]], mode="markers+text",
+            marker=dict(color=_REC_RED, size=8, symbol="triangle-down"),
+            text=[as_years_months(r["Days bottom → top"]) + ("" if r["Recovered"] else " (not yet)")],
+            textposition="bottom center", textfont=dict(size=10), showlegend=False,
+            hovertemplate=(f"Bottom {r['Bottom date']:%d-%m-%Y}: {r['Fall (%)']:.1f}%<br>"
+                           f"{'Back to top ' + format(r['Recovery date'], '%d-%m-%Y') if r['Recovered'] else 'Not back yet'}"
+                           f"<br><b>{r['Days bottom → top']:,} days bottom → top</b><extra></extra>")), row=2, col=1)
+        if r["Recovered"]:
+            fig.add_trace(go.Scatter(x=[r["Recovery date"].strftime("%Y-%m-%d")], y=[0], mode="markers",
+                                     marker=dict(color=_REC_GREEN, size=8, symbol="circle"), showlegend=False,
+                                     hovertemplate=f"Back at the top {r['Recovery date']:%d-%m-%Y}<extra></extra>"),
+                          row=2, col=1)
+    fig.update_layout(**PLOT_LAYOUT, height=620, hovermode="x unified",
+                      title=dict(text=f"{fund}: NAV, its top, and every big fall", x=0.01, xanchor="left"),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), margin=dict(l=12, r=12, t=70, b=12))
+    fig.update_yaxes(title_text="NAV (₹)", row=1, col=1)
+    fig.update_yaxes(title_text="Below top (%)", ticksuffix="%", row=2, col=1)
+    chart(fig, key=key)
+
+
+def render_recovery(full: pd.DataFrame, d_from, d_to, plan: str):
+    section("Recovery time: bottom → back to the top",
+            "How long each fund's NAV took to climb from its lowest point back to its old high", "⛰️", TEAL)
+    with panel():
+        c1, c2 = st.columns([1, 1], vertical_alignment="bottom")
+        if "mf_rec_plan" not in st.session_state:
+            st.session_state["mf_rec_plan"] = plan
+        plan = c1.segmented_control("Plan", ["Regular", "Direct"], key="mf_rec_plan") or "Regular"
+        if "mf_rec_min" not in st.session_state:
+            st.session_state["mf_rec_min"] = 10
+        min_fall = c2.select_slider("Count falls of at least", options=[5, 10, 15, 20, 25, 30, 40],
+                                    key="mf_rec_min", format_func=lambda v: f"{v}%")
+        st.caption("**Top** = highest NAV so far. **Bottom** = lowest NAV before it got back to that top. "
+                   "**Recovery** = days from the bottom until the NAV is at or above the old top again. "
+                   f"Dates: {d_from:%d %b %Y} → {d_to:%d %b %Y} (change them at the top of the page; start "
+                   "earlier, e.g. 2008, to include the 2008 crash).")
+    nav_col = "NAV_Regular" if plan == "Regular" else "NAV_Direct"
+    summ = fund_summary(full, nav_col, min_fall)
+    if summ.empty:
+        note("Not enough NAV data in this date range.", AMBER, "⏳")
+        return
+    summ["Category"] = pd.Categorical(summ["Category"], CATEGORIES, ordered=True)
+    summ = summ.sort_values(["Category", "Days bottom → top"]).reset_index(drop=True)
+
+    tabs = st.tabs(["🗂️ All", "🏢 Large Cap", "🏬 Mid Cap", "🏪 Small Cap"])
+    for tab, cat in zip(tabs, ["All"] + CATEGORIES):
+        with tab:
+            sub = summ if cat == "All" else summ[summ["Category"] == cat]
+            if sub.empty:
+                note(f"No {cat} scheme has data in this date range.", AMBER, "⏳")
+                continue
+            done = sub[sub["Recovered"]]
+            fast = done.loc[done["Days bottom → top"].idxmin()] if len(done) else None
+            slow = sub.loc[sub["Days bottom → top"].idxmax()]
+            deep = sub.loc[sub["Biggest fall (%)"].idxmin()]
+            kpi_row([
+                dict(label="Fastest back to the top", value=as_years_months(fast["Days bottom → top"]) if fast is not None else "—",
+                     delta=(fast["Fund"][:38] if fast is not None else "none recovered"), tone="good", icon="🚀",
+                     accent=EMERALD),
+                dict(label="Slowest back to the top", value=as_years_months(slow["Days bottom → top"])
+                     + ("" if slow["Recovered"] else " +"), delta=slow["Fund"][:38], tone="bad", icon="🐢", accent=BAD),
+                dict(label="Average (recovered)", value=as_years_months(done["Days bottom → top"].mean()) if len(done) else "—",
+                     delta=f"{len(done)} of {len(sub)} back at the top", icon="📊", accent=INDIGO),
+                dict(label="Deepest fall", value=f"{deep['Biggest fall (%)']:.1f}%", delta=deep["Fund"][:38],
+                     tone="bad", icon="📉", accent=ORANGE),
+            ])
+            with panel():
+                _recovery_bars(sub, key=f"mf_rec_bars_{cat}")
+                st.caption("Each bar = the fund's BIGGEST fall in these dates: days from its bottom back to the old "
+                           "top. Striped bar = not back yet (counted up to the last NAV). "
+                           + ("Colours: 🔵 Large Cap · 🟠 Mid Cap · 🟢 Small Cap." if cat == "All" else ""))
+            view = pd.DataFrame({
+                **({"Category": sub["Category"].astype(str)} if cat == "All" else {}),
+                "Fund": sub["Fund"],
+                "Biggest fall": sub["Biggest fall (%)"],
+                "Top date": sub["Top date"].dt.date, "Bottom date": sub["Bottom date"].dt.date,
+                "Back at top": [d.date() if r else None for d, r in zip(sub["Recovery date"], sub["Recovered"])],
+                "Days bottom → top": sub["Days bottom → top"],
+                "Bottom → top": [as_years_months(d) + ("" if r else " (not yet)")
+                                 for d, r in zip(sub["Days bottom → top"], sub["Recovered"])],
+                "Days top → bottom": sub["Days top → bottom"],
+                "Days underwater": sub["Days underwater"],
+                f"Falls ≥ {min_fall}%": sub[f"Falls ≥ {min_fall:g}%"],
+                f"Avg bottom → top (falls ≥ {min_fall}%)": [as_years_months(d) for d in sub["Average bottom → top (days)"]],
+                f"Longest bottom → top (falls ≥ {min_fall}%)": [as_years_months(d) for d in sub["Longest bottom → top (days)"]],
+                "Now below top": sub["Now below top (%)"],
+            })
+            date_cfg = {c: st.column_config.DateColumn(format="DD-MM-YYYY") for c in ("Top date", "Bottom date", "Back at top")}
+            with panel():
+                st.dataframe(view.style.format({"Biggest fall": "{:.2f}%", "Now below top": "{:.2f}%",
+                                                "Days bottom → top": "{:,.0f}", "Days top → bottom": "{:,.0f}",
+                                                "Days underwater": "{:,.0f}"}, na_rep="—"),
+                             hide_index=True, width="stretch", key=f"mf_rec_tbl_{cat}", column_config=date_cfg)
+            st.download_button("⬇️  Download recovery summary (CSV)", sub.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"mf_recovery_{cat.replace(' ', '_').lower()}_{plan.lower()}.csv",
+                               key=f"mf_rec_dl_{cat}")
+
+    # ---------- one fund in detail: every fall + the day-by-day working ----------
+    group_of = full.groupby("Fund")["Group"].first()
+    funds = list(summ["Fund"])
+    if st.session_state.get("mf_rec_fund") not in funds:
+        st.session_state["mf_rec_fund"] = funds[0]
+    with panel():
+        fund = st.selectbox("See every fall of one fund", funds, key="mf_rec_fund",
+                            format_func=lambda f: f"{group_of.get(f, '')} · {f}")
+    nav = full[full["Fund"] == fund].set_index("Date")[nav_col]
+    steps, f = daily_steps(nav), falls(nav, min_fall)
+    with panel():
+        _recovery_fund_chart(steps, f, fund, key="mf_rec_fund_chart")
+    st.caption(f"Top: NAV and its running top (the dotted line only moves up). Bottom: how far below the top the NAV "
+               f"was each day. Shaded = a fall of at least {min_fall}% (top → bottom → back to the top). ▼ = bottom, "
+               f"with the time it took to get back to the top; ● = the day it got back.")
+    if f.empty:
+        note(f"No fall of {min_fall}% or more in these dates.", AMBER, "💡")
+    else:
+        ev = f.iloc[::-1].copy()                                       # newest first
+        ev_view = pd.DataFrame({
+            "Top date": ev["Top date"].dt.date, "Top NAV": ev["Top NAV"],
+            "Bottom date": ev["Bottom date"].dt.date, "Bottom NAV": ev["Bottom NAV"],
+            "Back at top": [d.date() if r else None for d, r in zip(ev["Recovery date"], ev["Recovered"])],
+            "Fall": ev["Fall (%)"], "Gain needed from bottom": ev["Gain needed (%)"],
+            "Days top → bottom": ev["Days top → bottom"], "Days bottom → top": ev["Days bottom → top"],
+            "Bottom → top": [as_years_months(d) + ("" if r else " (not yet)")
+                             for d, r in zip(ev["Days bottom → top"], ev["Recovered"])],
+            "Days underwater": ev["Days underwater"]})
+        st.dataframe(ev_view.style.format({"Top NAV": "{:,.4f}", "Bottom NAV": "{:,.4f}", "Fall": "{:.2f}%",
+                                           "Gain needed from bottom": "{:+.2f}%"}, na_rep="—"),
+                     hide_index=True, width="stretch", key="mf_rec_events",
+                     column_config={c: st.column_config.DateColumn(format="DD-MM-YYYY")
+                                    for c in ("Top date", "Bottom date", "Back at top")})
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", fund)
+    c1, c2 = st.columns(2)
+    c1.download_button(f"⬇️  Every fall ≥ {min_fall}% (CSV)", f.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"falls_{safe}_{plan.lower()}.csv", key="mf_rec_dl_falls")
+    c2.download_button("⬇️  Day-by-day working: NAV, running top, fall % (CSV)",
+                       steps.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"recovery_working_{safe}_{plan.lower()}.csv", key="mf_rec_dl_steps")
+    st.caption("How it's calculated: Running top = highest NAV so far (Excel: =MAX($B$2:B2)). Fall from top = NAV ÷ "
+               "running top − 1. A fall starts when the NAV drops below its top and ends on the first day the NAV "
+               "is back at or above that top. Days bottom → top = that day − the day of the lowest NAV in between. "
+               "Calendar days. The day-by-day CSV lets you check every number in Excel.")
+
+
+# ---------------------------------------------------------
 # Page: ratios + data, no sidebar
 # ---------------------------------------------------------
 def _table(full: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -514,6 +703,7 @@ def render_mf_page(asset_dfs, fetch_errors):
     render_ratios(full, asset_dfs, d_from, d_to)
     plan, rf = st.session_state.get("_mf_plan_rf", ("Regular", 0.0))
     render_weekly(full, asset_dfs, d_from, d_to, plan, rf)
+    render_recovery(full, d_from, d_to, plan)
 
     section("NAV data", "Daily NAV of every scheme for the dates above", "📋", INDIGO)
     t_reg, t_dir = st.tabs(["Regular plan · Growth", "Direct plan · Growth"])
