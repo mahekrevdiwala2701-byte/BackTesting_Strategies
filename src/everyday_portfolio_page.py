@@ -1,6 +1,6 @@
 """💼 Everyday Portfolio: invest an amount split across GoldBEES / LargeCap / MidCap / SmallCap by your weights.
 
-Year-on-year chained logic, per index (default start = 01-01-2015):
+Year-on-year chained logic, per index (default start = 01-01-2018):
   * Year 1 (start → one year later): index value = actual Close price.
   * Every later day d: YoY % = price(d) / price(same day one year earlier) − 1,
     applied to the index value at the end of the previous year.
@@ -25,7 +25,7 @@ from src.ui import (
 from src.asset_data import ASSETS, ASSET_LABELS, ASSET_SHORT, ASSET_ICONS, COLORS, style_change_cols, blank_missing
 from src.period_picker import today_ist
 
-DEFAULT_START = date(2015, 1, 1)
+from src.period_picker import DEFAULT_START  # 01-01-2018, shared by every page
 PORTFOLIO_COLOR = INK
 ROLL_WINDOWS = {"1 Year": 1, "3 Years": 3, "5 Years": 5}
 

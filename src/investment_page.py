@@ -16,6 +16,7 @@ from src.strategies import (
     STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS,
     build_rebalance_dates, simulate_portfolio, simulate_buy_hold, build_diff_schedule,
 )
+from src.excel_export import build_investment_workbook
 
 
 def _extend_lookbacks(options):
@@ -278,7 +279,26 @@ def render_investment_page(asset_dfs, fetch_errors):
 
     # ---------------- Extras behind buttons ----------------
     section("Data & more", "The asset-wise table and every rebalance, when you need them", "📥", AMBER)
-    on = action_bar(toggles=[("📋 Asset-wise breakdown", "inv_show_breakdown"), ("🧾 Rebalance log", "inv_show_log")])
+    on = action_bar(toggles=[("📋 Asset-wise breakdown", "inv_show_breakdown"), ("🧾 Rebalance log", "inv_show_log"),
+                             ("📊 Excel workbook (all steps)", "inv_show_excel")])
+    if on["inv_show_excel"]:
+        # ---------------- Full step-by-step Excel workbook ----------------
+        section("Excel workbook", "Every step as a live Excel formula: inputs → prices → buys / rebalances → "
+                "daily value → result → comparison", "📊", EMERALD)
+        with st.spinner("Building the Excel workbook..."):
+            xlsx = build_investment_workbook(
+                mode, prices, schedule, {n: weights[n] for n in used}, w0, total_amount, decisions,
+                freq_label, lookback_label, start_date, end_date)
+        note("The first sheet, <b>All Steps</b>, has everything on one page: your inputs → result vs Buy & Hold → "
+             "comparison with 100% in one asset → asset-wise breakdown → prices on every rebalance day → "
+             "<b>every buy / rebalance worked out step by step</b> (prices, units, values, target, buy / sell, "
+             "units after, cash check). The other sheets hold the detail (daily prices, daily values). "
+             "Change the amount or weights in the yellow cells of <b>Inputs</b> and everything recalculates.",
+             EMERALD, "📊")
+        st.download_button("⬇️  Download full calculation (Excel)", xlsx,
+                           file_name=f"calculated_investment_{mode}_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           type="primary", key="inv_xlsx_download")
     if on["inv_show_breakdown"]:
         # ---------------- Breakdown table ----------------
         section("Asset-wise breakdown", "Net invested = money put in minus money taken out at rebalances", "📋",
@@ -349,16 +369,22 @@ def _render_rebalance_data(schedule, trade_log, used, prices, units_df, values, 
     cf_col = f'Compare From ({lookback_label})'
 
     rows = []
+    last_dt, last_px = {}, {}          # previous buy / rebalance date and price of each asset
     for k in range(len(schedule)):
         step = trade_log[trade_log['Rebalance #'] == k + 1]
         for n in used:
             r = step[step['Asset'] == n].iloc[0]
             pv = r['Portfolio Value (₹)']
+            p_prev = last_px.get(n)
             row = {
                 'Date': r['Date'].strftime('%d-%m-%Y'),
                 'Type': 'First Buy' if k == 0 else 'Rebalance',
                 'Asset': _short(n),
                 'Price (₹)': round(r['Price (₹)'], 2),
+                'Last Rebalance Date': last_dt[n].strftime('%d-%m-%Y') if n in last_dt else None,
+                'Price at Last Rebalance (₹)': round(p_prev, 2) if p_prev is not None else None,
+                'Price Change Since Last (%)': round((r['Price (₹)'] / p_prev - 1) * 100, 2) if p_prev else None,
+                'Gain Since Last (₹)': round(r['Units Before'] * (r['Price (₹)'] - p_prev), 2) if p_prev else None,
             }
             if decisions is not None:
                 d = cmp[(k + 1, n)]
@@ -371,28 +397,43 @@ def _render_rebalance_data(schedule, trade_log, used, prices, units_df, values, 
                 'Value Before (₹)': round(r['Value Before (₹)'], 2),
                 'Weight Before (%)': round(r['Value Before (₹)'] / pv * 100, 2) if k > 0 else 0.0,
                 'Units Bought / Sold': round(r['Units Bought (+) / Sold (−)'], 4),
+                'Trade Amount (₹)': round(r['Trade Amount (₹)'], 2),
+                'Action': ('BUY' if r['Units Bought (+) / Sold (−)'] > 1e-9 else
+                           'SELL' if r['Units Bought (+) / Sold (−)'] < -1e-9 else 'HOLD'),
                 'Units After': round(r['Units After'], 4),
                 'Value After (₹)': round(r['Target Value (₹)'], 2),
                 'Weight After (%)': round(r['Target Weight (%)'], 2),
                 'Portfolio Value (₹)': round(pv, 2),
             })
             rows.append(row)
+        for n in used:                                # remember this step for the next one
+            r = step[step['Asset'] == n].iloc[0]
+            last_dt[n], last_px[n] = r['Date'], r['Price (₹)']
     end_dt = prices.index[-1]
     for n in used:
+        p_end, p_prev = prices[n].iloc[-1], last_px[n]
         end_row = {'Date': end_dt.strftime('%d-%m-%Y'), 'Type': 'End Value', 'Asset': _short(n),
-                   'Price (₹)': round(prices[n].iloc[-1], 2)}
+                   'Price (₹)': round(p_end, 2),
+                   'Last Rebalance Date': last_dt[n].strftime('%d-%m-%Y'),
+                   'Price at Last Rebalance (₹)': round(p_prev, 2),
+                   'Price Change Since Last (%)': round((p_end / p_prev - 1) * 100, 2),
+                   'Gain Since Last (₹)': round(units_df[n].iloc[-1] * (p_end - p_prev), 2)}
         if decisions is not None:
             end_row.update({cf_col: None, 'Prev Price (₹)': None, 'Change vs Prev (%)': None, 'Growth Rank': None})
         end_row.update({
             'Units Before': round(units_df[n].iloc[-1], 4),
             'Value Before (₹)': round(values[n].iloc[-1], 2),
             'Weight Before (%)': round(values[n].iloc[-1] / current * 100, 2),
-            'Units Bought / Sold': None, 'Units After': None, 'Value After (₹)': None, 'Weight After (%)': None,
+            'Units Bought / Sold': None, 'Trade Amount (₹)': None, 'Action': None, 'Units After': None,
+            'Value After (₹)': None, 'Weight After (%)': None,
             'Portfolio Value (₹)': round(current, 2),
         })
         rows.append(end_row)
     reb = pd.DataFrame(rows)
-    if decisions is not None:
+    st.caption("**Price at Last Rebalance** = the asset's price on the previous buy / rebalance day. "
+               "**Gain Since Last** = units held × (price now − that price). **Trade Amount** = money put in (+) or "
+               "taken out (−) of the asset on this day; on a rebalance they add up to 0.")
+    if decisions is not None:   
         st.caption(f"**Prev Price** = the asset's price {lookback_label} before that date (on the *Compare From* "
                    "date). **Change vs Prev** = % growth from Prev Price to Price. Rank 1 = highest growth.")
     st.dataframe(blank_missing(reb)[0], width="stretch", height=340, hide_index=True)

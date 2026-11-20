@@ -12,6 +12,10 @@ MONTH_PRESETS = {
     "3 Years": 36, "5 Years": 60, "All Data": None, "Custom Range": "custom",
 }
 
+# Default starting date used by EVERY page (Home, Calculated Investment, Everyday Portfolio,
+# Mutual Funds, Monte Carlo). Change it here to change it everywhere.
+DEFAULT_START = date(2018, 1, 1)
+
 # Earliest date offered by the Custom Range calendar.
 CUSTOM_RANGE_START = pd.Timestamp("2010-1-1").date()
 
@@ -47,7 +51,7 @@ def period_selector(asset_dfs, default_preset="Custom Range", key="main"):
         range_max = today                                # calendar ends on 15-10-2026
 
         from_date = st.sidebar.date_input(
-            "📍 From date", value=range_min, min_value=range_min, max_value=range_max,
+            "📍 From date", value=max(DEFAULT_START, range_min), min_value=range_min, max_value=range_max,
             format="DD-MM-YYYY", key=f"{key}_from_date")
         to_date = st.sidebar.date_input(
             "🏁 To date", value=range_max, min_value=range_min, max_value=range_max,
@@ -65,7 +69,7 @@ def period_selector(asset_dfs, default_preset="Custom Range", key="main"):
 
     end_date = today
     if preset_val is None:
-        start_date = overall_min
+        start_date = max(overall_min, DEFAULT_START)
     else:
         start_date = max(overall_min, (pd.Timestamp(today) - pd.DateOffset(months=preset_val)).date())
 

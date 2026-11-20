@@ -17,6 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from src.period_picker import DEFAULT_START  # 01-01-2018, shared by every page
 from src.ui import (
     panel,
     PLOT_LAYOUT, STRAT_COLORS, GOOD, BAD, TEXT, INK, MUTED, FAINT,
@@ -134,13 +135,13 @@ def render_monte_carlo_page(asset_dfs, fetch_errors):
     if not used:
         note("No asset data loaded.", BAD, "⛔")
         st.stop()
-    rets, dropped = mc.monthly_returns(asset_dfs, used)
+    rets, dropped = mc.monthly_returns(asset_dfs, used, start_date=DEFAULT_START)   # history from 01-01-2018
 
     hero("Monte Carlo Simulation",
          "What could ₹1 lakh become in 10 years? We replay real market history in thousands of different orders "
          "and count how often each outcome happens.",
          page="montecarlo", eyebrow="What could happen next",
-         chips=[f"💰 {_inr(AMOUNT)} invested", f"⏳ {YEARS}-year horizon", f"📚 {len(rets)} real months of history"])
+         chips=[f"💰 {_inr(AMOUNT)} invested", f"⏳ {YEARS}-year horizon", f"📚 {len(rets)} real months of history (since {DEFAULT_START:%b %Y})"])
 
     if len(rets) < 24:
         note(f"Only {len(rets)} months where all assets have data. At least 2 years are needed.", BAD, "⛔")

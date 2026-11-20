@@ -38,7 +38,7 @@ from src.drawdown import underwater, drawdown_periods, drawdown_summary
 from src.everyday_portfolio_page import build_everyday_portfolio, sharpe_weekly
 from src.tearsheet import metrics as ts_metrics, period_returns, PERIODS, LAYOUT as KPI_LAYOUT, fmt as ts_fmt
 
-DEFAULT_START = date(2010, 1, 1)
+from src.period_picker import DEFAULT_START  # 01-01-2018, shared by every page
 PORT_COLOR = INDIGO        # cards about the whole portfolio (charts draw it as the white PORTFOLIO line)
 
 
