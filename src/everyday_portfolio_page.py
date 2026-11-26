@@ -234,6 +234,34 @@ def sharpe_weekly(asset_dfs, results, portfolio, start, end, rf=0.0):
     return {k: v for k, v in out.items() if len(v)}, weeks
 
 
+def sharpe_overall(series: pd.Series, start, end, rf: float = 0.0) -> dict:
+    """One Sharpe for the whole period, same logic as sharpe_at but over the full window:
+       Rp = annualised return (CAGR, %) from the first to the last price in [start, end]
+       σ  = annualised log σ (%) of ALL weekly returns in the window
+            (last date, 1 week before, 2 weeks before … ; a holiday uses the last trading day before it;
+             sample std dev n−1 × √52)
+       Sharpe = (Rp − Rf) / σ"""
+    s = series.dropna().sort_index()
+    s = s[~s.index.duplicated(keep='last')]
+    s = s[(s > 0) & (s.index >= pd.Timestamp(start)) & (s.index <= pd.Timestamp(end))]
+    blank = {'From': pd.NaT, 'To': pd.NaT, 'Years': np.nan, 'Weeks': 0,
+             'CAGR (%)': np.nan, 'Annualised σ (%)': np.nan, 'Sharpe': np.nan}
+    if len(s) < 2:
+        return blank
+    first, last = s.index[0], s.index[-1]
+    years = (last - first).days / 365.25
+    weeks = week_dates_back(last, first)[::-1]                              # oldest → newest
+    pos = s.index.searchsorted(weeks, side='right') - 1
+    logp = np.log(s.to_numpy(dtype=float)[pos])
+    rets = np.diff(logp)                                                      # ln(P_newer / P_older)
+    if years <= 0 or len(rets) < 2:
+        return blank
+    cagr = ((s.iloc[-1] / s.iloc[0]) ** (1 / years) - 1) * 100
+    sd = rets.std(ddof=1) * np.sqrt(52) * 100
+    return {'From': first, 'To': last, 'Years': years, 'Weeks': len(rets),
+            'CAGR (%)': cagr, 'Annualised σ (%)': sd, 'Sharpe': (cagr - rf) / sd if sd > 0 else np.nan}
+
+
 def week_dates_back(last, start):
     """last date, 1 week before, 2 weeks before … down to `start`."""
     out, d, s_ts = [], pd.Timestamp(last), pd.Timestamp(start)

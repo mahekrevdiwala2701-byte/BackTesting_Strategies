@@ -4,6 +4,7 @@ import re
 import tempfile
 import threading
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
@@ -12,6 +13,7 @@ import streamlit as st
 from src.ui import PLOT_LAYOUT as _UI_PLOT_LAYOUT, GOOD_TEXT, BAD_TEXT
 
 from src.data_loader import (
+    robust_parse_financial_dataframe,
     load_csv_data,
     get_available_datasets,
     parse_google_sheet_url,
@@ -21,17 +23,63 @@ from src.data_loader import (
 
 ASSETS = ['Gold', 'LargeCap', 'MidCap', 'SmallCap']
 
-ASSET_LABELS = {
+# ---------------------------------------------------------
+# Extra indices added by the user (any number, kept per browser session).
+# Their key is "IDX:<name>", so the name / icon / colour lookups below work for them
+# without changing any of the dictionaries' users.
+# ---------------------------------------------------------
+CUSTOM_PREFIX = "IDX:"
+_CUSTOM_COLORS = ['#DB2777', '#EA580C', '#65A30D', '#0891B2', '#9333EA', '#DC2626', '#4F46E5', '#CA8A04',
+                  '#059669', '#BE185D', '#0284C7', '#7C2D12']
+
+
+def is_custom(key) -> bool:
+    return isinstance(key, str) and key.startswith(CUSTOM_PREFIX)
+
+
+def custom_key(name: str) -> str:
+    return CUSTOM_PREFIX + " ".join(str(name).split())
+
+
+def _custom_name(key):
+    return key[len(CUSTOM_PREFIX):]
+
+
+def _custom_color(key):
+    return _CUSTOM_COLORS[zlib.crc32(key.encode('utf-8')) % len(_CUSTOM_COLORS)]
+
+
+class _AssetMap(dict):
+    """Normal dict for the 4 built-in assets; works out the value for a user-added 'IDX:<name>' key."""
+    def __init__(self, data, make):
+        super().__init__(data)
+        self._make = make
+
+    def __missing__(self, key):
+        if is_custom(key):
+            return self._make(key)
+        raise KeyError(key)
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+ASSET_LABELS = _AssetMap({
     'Gold': '🥇 GoldBEES',
     'LargeCap': '🏢 LargeCap (Nifty 50)',
     'MidCap': '🏬 MidCap',
     'SmallCap': '🏪 SmallCap'
-}
-ASSET_SHORT = {'Gold': 'GoldBEES', 'LargeCap': 'Nifty 50', 'MidCap': 'MidCap', 'SmallCap': 'SmallCap'}
-ASSET_ICONS = {'Gold': '🥇', 'LargeCap': '🏢', 'MidCap': '🏬', 'SmallCap': '🏪'}
+}, lambda k: f"📈 {_custom_name(k)}")
+ASSET_SHORT = _AssetMap({'Gold': 'GoldBEES', 'LargeCap': 'Nifty 50', 'MidCap': 'MidCap', 'SmallCap': 'SmallCap'},
+                        _custom_name)
+ASSET_ICONS = _AssetMap({'Gold': '🥇', 'LargeCap': '🏢', 'MidCap': '🏬', 'SmallCap': '🏪'}, lambda k: '📈')
 
 # One vivid colour per asset, used on every chart, card and chip
-COLORS = {'Gold': '#C8901A', 'LargeCap': '#2563EB', 'MidCap': '#7C3AED', 'SmallCap': '#0D9488'}
+COLORS = _AssetMap({'Gold': '#C8901A', 'LargeCap': '#2563EB', 'MidCap': '#7C3AED', 'SmallCap': '#0D9488'},
+                   _custom_color)
 
 # Google Sheet Live URLs
 SHEET_URLS = {
@@ -326,3 +374,90 @@ def backup_assets(fetch_errors):
 def filter_period(asset_dfs, start_date, end_date):
     s, e = pd.Timestamp(start_date), pd.Timestamp(end_date)
     return {n: df[(df['Date'] >= s) & (df['Date'] <= e)].reset_index(drop=True) for n, df in asset_dfs.items()}
+
+# ---------------------------------------------------------
+# Load one extra index (Google Sheet link or CSV upload)
+# ---------------------------------------------------------
+def load_custom_index(sheet_url: str = "", uploaded=None):
+    """Returns (df, error). df has the same columns as the built-in assets (Date, Close, …)."""
+    try:
+        if uploaded is not None:
+            raw = pd.read_csv(uploaded, header=None)
+            df = robust_parse_financial_dataframe(raw)
+        elif sheet_url and sheet_url.strip():
+            df, err = download_sheet_csv(parse_google_sheet_url(sheet_url.strip()))
+            if err:
+                return None, _friendly_error(err)
+        else:
+            return None, "Paste a Google Sheet link or upload a CSV file."
+    except Exception as e:                                   # unreadable file / bad link
+        return None, f"Could not read the data: {e}"
+    df = normalize_asset_df(df)
+    if df is None or len(df) < 2:
+        return None, "No Date and Close price columns found."
+    return df, None
+
+
+# ---------------------------------------------------------
+# Extra indices: shared by the Main Dashboard and the Calculated Investment page
+# ---------------------------------------------------------
+INDEX_PICKERS = ("yoy_assets", "invest_assets")       # session keys of the index multiselects
+
+
+def custom_index_keys():
+    return list(st.session_state.get("custom_indices", {}))
+
+
+def with_custom_indices(asset_dfs):
+    """Built-in indices + the extra ones added in the sidebar (any number of them)."""
+    return {**asset_dfs, **st.session_state.get("custom_indices", {})}
+
+
+def _add_custom_index():
+    """Button callback: load the index typed in the sidebar and tick it in the index picker."""
+    name = " ".join(st.session_state.get("ci_name", "").split())
+    if not name:
+        st.session_state["ci_msg"] = ("error", "Give the index a name.")
+        return
+    key = custom_key(name)
+    taken = {ASSET_SHORT[a].lower() for a in ASSETS} | {ASSET_SHORT[k].lower()
+                                                        for k in st.session_state.get("custom_indices", {})}
+    if name.lower() in taken:
+        st.session_state["ci_msg"] = ("error", f"An index called '{name}' is already in the list.")
+        return
+    df, err = load_custom_index(st.session_state.get("ci_url", ""), st.session_state.get("ci_file"))
+    if err:
+        st.session_state["ci_msg"] = ("error", f"{name}: {err}")
+        return
+    st.session_state.setdefault("custom_indices", {})[key] = df
+    for picker in INDEX_PICKERS:                          # tick it in every page's index picker
+        if picker in st.session_state:
+            st.session_state[picker] = list(st.session_state[picker]) + [key]
+    st.session_state["ci_name"], st.session_state["ci_url"] = "", ""
+    st.session_state["ci_msg"] = ("ok", f"Added {name}: {len(df):,} prices, "
+                                        f"{df['Date'].min():%d-%m-%Y} → {df['Date'].max():%d-%m-%Y}.")
+
+
+def _remove_custom_index(key):
+    st.session_state.get("custom_indices", {}).pop(key, None)
+    for picker in INDEX_PICKERS:
+        if picker in st.session_state:
+            st.session_state[picker] = [a for a in st.session_state[picker] if a != key]
+
+
+def custom_index_sidebar():
+    """Sidebar box to add any number of extra indices (Google Sheet link or CSV with Date + Close)."""
+    custom = st.session_state.get("custom_indices", {})
+    with st.sidebar.expander(f"➕ Add an index ({len(custom)} added)", expanded=False):
+        st.text_input("Index name", key="ci_name", placeholder="e.g. Nifty Bank")
+        st.text_input("Google Sheet link", key="ci_url", placeholder="https://docs.google.com/spreadsheets/d/…",
+                      help="Sheet shared as 'Anyone with the link can view', with Date and Close columns.")
+        st.file_uploader("…or upload a CSV (Date, Close)", type=["csv"], key="ci_file")
+        st.button("Add index", key="ci_add", on_click=_add_custom_index, width="stretch")
+        msg = st.session_state.pop("ci_msg", None)
+        if msg:
+            (st.success if msg[0] == "ok" else st.error)(msg[1])
+        for k in list(custom):
+            c1, c2 = st.columns([4, 1])
+            c1.markdown(f"{ASSET_ICONS[k]} **{ASSET_SHORT[k]}**")
+            c2.button("✕", key=f"ci_rm_{k}", on_click=_remove_custom_index, args=(k,), help="Remove this index")

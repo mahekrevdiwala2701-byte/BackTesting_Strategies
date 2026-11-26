@@ -8,9 +8,11 @@ from src.ui import (
     panel,
     PLOT_LAYOUT, STRAT_COLORS, VIOLET, CYAN, EMERALD, AMBER, BLUE, BAD, FAINT, TEXT, MUTED,
     hero, section, kpi_row, tone_of, note, explain, chart, hex_rgba, inr, inr_short, pct,
-    sidebar_nav, sidebar_footer, action_bar,
+    sidebar_nav, sidebar_footer, action_bar, start_value,
 )
 from src.asset_data import ASSETS, ASSET_LABELS, ASSET_SHORT, ASSET_ICONS, COLORS, style_change_cols, blank_missing
+import src.excel_export as _xl
+from src.mf_page import load_mf_history, CATEGORIES
 from src.period_picker import period_selector
 from src.strategies import (
     STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS,
@@ -42,6 +44,41 @@ STRATEGY_HELP = {
 }
 
 
+_MF_COLORS = ['#DB2777', '#EA580C', '#65A30D', '#0891B2', '#9333EA', '#DC2626', '#4F46E5', '#CA8A04',
+              '#059669', '#BE185D', '#0284C7', '#7C2D12']
+
+
+def _register_fund(key, fund, i):
+    """Give a fund a name, icon and colour so every chart, table and the Excel export can show it."""
+    ASSET_SHORT[key] = fund
+    ASSET_LABELS[key] = f"💼 {fund}"
+    ASSET_ICONS[key] = "💼"
+    COLORS[key] = _MF_COLORS[i % len(_MF_COLORS)]
+    if isinstance(getattr(_xl, "ASSET_SHORT", None), dict):
+        _xl.ASSET_SHORT[key] = fund
+
+
+def _with_mutual_funds(asset_dfs):
+    """Load every fund from the MF dashboard as it is: Date + Close (= the fund's NAV of the chosen plan).
+    No cleaning or calculation on the NAVs. Returns (asset_dfs incl. funds, {fund key: category})."""
+    full, _, _ = load_mf_history()
+    if full is None or full.empty:
+        return asset_dfs, {}
+    col = "NAV_Direct" if st.session_state.get("invest_mf_plan", "Regular") == "Direct" else "NAV_Regular"
+    rank = {c: i for i, c in enumerate(CATEGORIES)}
+    groups = full.groupby("Fund")["Group"].first()
+    out, mf_group = dict(asset_dfs), {}
+    for i, fund in enumerate(sorted(groups.index, key=lambda f: (rank.get(groups[f], 9), f))):
+        nav = full.loc[full["Fund"] == fund, ["Date", col]].rename(columns={col: "Close"}).dropna()
+        if len(nav):
+            key = "MF:" + fund
+            _register_fund(key, fund, i)
+            out[key] = (nav.sort_values("Date").drop_duplicates("Date", keep="last")   # one NAV per day
+                        .reset_index(drop=True))
+            mf_group[key] = groups[fund]
+    return out, mf_group
+
+
 def _short(name):
     return ASSET_SHORT[name]
 
@@ -54,7 +91,8 @@ def render_investment_page(asset_dfs, fetch_errors):
 
     # ---------------- Hero ----------------
     hero("Calculated Investment",
-         "Enter an amount, split it across GoldBEES, Nifty 50, MidCap and SmallCap, and see exactly what it "
+         "Enter an amount, split it across any of the 4 indices and the mutual funds from the MF dashboard, "
+         "and see exactly what it "
          "would be worth today with buy & hold, regular rebalancing, or growth-based weights.",
          page="invest", eyebrow="Backtest your split",
          chips=[f"📅 {start_date:%d %b %Y} → {end_date:%d %b %Y}", "⚙️ Change the period in the sidebar"])
@@ -70,6 +108,19 @@ def render_investment_page(asset_dfs, fetch_errors):
     section("Step 2 · Amount & weights", "Weights that don't add up to 100% are scaled automatically", "💵",
             EMERALD)
     freq_label, lookback_label = None, None
+    asset_dfs, mf_group = _with_mutual_funds(asset_dfs)
+    available = [a for a in ASSETS if a in asset_dfs] + list(mf_group)
+    start_value("invest_assets", [a for a in ASSETS if a in asset_dfs], available)
+    p1, p2 = st.columns([4, 1], vertical_alignment="bottom")
+    picked = p1.multiselect("📊 What to invest in (indices + mutual funds)", available, key="invest_assets",
+                            format_func=lambda a: (f"{ASSET_ICONS[a]} {ASSET_SHORT[a]}" if a in ASSETS
+                                                   else f"💼 {mf_group[a]} · {ASSET_SHORT[a]}"),
+                            help="Pick 1, 2, 3, 4 or more: the 4 indices and every fund loaded on the MF dashboard.")
+    p2.radio("MF plan", ["Regular", "Direct"], key="invest_mf_plan", horizontal=True,
+             help="Which NAV is used for the mutual funds (Growth option).")
+    if not picked:
+        note("Pick at least one index or fund to invest in.", AMBER, "👆")
+        st.stop()
     with st.form("investment_form"):
         a1, a2 = st.columns([1.2, 2])
         with a1:
@@ -90,10 +141,15 @@ def render_investment_page(asset_dfs, fetch_errors):
 
         st.markdown("**⚖️ Weight of each asset (%)**")
         weights = {}
-        for col, name in zip(st.columns(4), ASSETS):
-            with col:
+        share = round(100 / len(picked), 2)
+        defaults = [share] * (len(picked) - 1) + [round(100 - share * (len(picked) - 1), 2)]   # adds up to 100
+        per_row = min(len(picked), 4)
+        for i, (name, d) in enumerate(zip(picked, defaults)):
+            if i % per_row == 0:
+                cols = st.columns(per_row)
+            with cols[i % per_row]:
                 weights[name] = st.number_input(f"{ASSET_ICONS[name]} {ASSET_SHORT[name]}", min_value=0.0,
-                                                max_value=100.0, value=25.0, step=5.0, key=f"w_{name}")
+                                                max_value=100.0, value=d, step=5.0, key=f"w_{name}_{len(picked)}")
         submitted = st.form_submit_button("🧮  Calculate investment", width="stretch", type="primary")
 
     if not submitted and "invest_done" not in st.session_state:
@@ -109,7 +165,7 @@ def render_investment_page(asset_dfs, fetch_errors):
     if abs(total_w - 100) > 0.01:
         note(f"Your weights add up to <b>{total_w:.1f}%</b>, so they were scaled to 100%.", AMBER, "⚖️")
 
-    used = [n for n in ASSETS if weights[n] > 0]
+    used = [n for n in picked if weights.get(n, 0) > 0]
     missing = [n for n in used if asset_dfs.get(n) is None
                or (asset_dfs[n]['Date'] > pd.Timestamp(end_date)).all()]   # no price on/before the end
     if missing:

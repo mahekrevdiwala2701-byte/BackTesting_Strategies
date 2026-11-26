@@ -35,7 +35,7 @@ from src.alpha import (calculated_investment_values, benchmark_close, period_alp
                        FREQUENCIES as ALPHA_FREQS)
 from src.strategies import STRATEGIES, REBAL_FREQ, DIFF_REBAL_FREQ, LOOKBACK_OPTIONS
 from src.drawdown import underwater, drawdown_periods, drawdown_summary
-from src.everyday_portfolio_page import build_everyday_portfolio, sharpe_weekly
+from src.everyday_portfolio_page import build_everyday_portfolio, sharpe_weekly, sharpe_overall
 from src.tearsheet import metrics as ts_metrics, period_returns, PERIODS, LAYOUT as KPI_LAYOUT, fmt as ts_fmt
 
 from src.period_picker import DEFAULT_START  # 01-01-2018, shared by every page
@@ -162,8 +162,6 @@ VIEWS = {                       # key -> (button label, section title, subtitle,
                  "How far below its previous high the portfolio was, every day", "🌊", BLUE),
     "alpha":    ("🎯 Alpha",          "Alpha", "How much the portfolio beat the benchmark each period", "🎯", AMBER),
     "yearly":   ("🗓️ Year by year",   "Year by year", "Average, best and worst return per investment year", "🗓️", AMBER),
-    "kpi":      ("📊 Key performance", "Key performance", "Strategy metrics and returns per week, month, quarter, year",
-                 "📊", INDIGO),
     "data":     ("📥 Data",           "Data & more", "Download everything, the full table, each asset", "📥", CYAN),
 }
 def render_home_page(asset_dfs, fetch_errors):
@@ -278,10 +276,12 @@ def render_home_page(asset_dfs, fetch_errors):
         _alpha_tab(asset_dfs, settings, strat)
     elif view == "yearly":
         _yearly_tab(table)
-    elif view == "kpi":
-        _kpi_tab(asset_dfs, settings, strat)
     else:
         _data_tab(table, years, asset_dfs, w_norm, from_date, to_date, trading_only)
+
+    # ---------------- Key performance (always visible, after the selected view) ----------------
+    section("Key performance", "Strategy metrics and returns per week, month, quarter, year", "📊", INDIGO)
+    _kpi_tab(asset_dfs, settings, strat)
 
 
 def _strategy_sidebar(avail):
@@ -1087,7 +1087,7 @@ _KPI_CSS = """<style>
 .qs tr.gap + tr td { padding-top:9px; }
 </style>"""
 
-_KPI_NO_TONE = {'rf', 'time_in_market', 'psr', 'vol', 'longest_dd', 'skew', 'kurt', 'start', 'end'}
+_KPI_NO_TONE = {'rf', 'time_in_market', 'psr', 'vol', 'vol_wlog', 'longest_dd', 'skew', 'kurt', 'start', 'end'}
 
 
 @st.cache_data(show_spinner="Calculating key performance...", max_entries=64)
@@ -1100,7 +1100,20 @@ def _cached_kpi(asset_dfs, w_norm, amount, from_date, to_date, mode, freq_m, loo
     b = benchmark_close(asset_dfs, bench)
     b = b.reindex(b.index.union(values.index)).ffill().reindex(values.index).dropna()
     rets = {f: (period_returns(values, rule) * 100, period_returns(b, rule) * 100) for f, rule in PERIODS.items()}
-    return ts_metrics(values), ts_metrics(b), rets
+    pm, bm = ts_metrics(values), ts_metrics(b)
+    for m, s in ((pm, values), (bm, b)):
+        _add_overall_sharpe(m, s, values.index[0], values.index[-1])
+    return pm, bm, rets
+
+
+def _add_overall_sharpe(m, series, start, end):
+    """Overall Sharpe, same logic as the weekly Sharpe chart but over the whole period:
+    (CAGR − risk-free) ÷ annualised σ of every weekly log return (σ × √52)."""
+    if not m:
+        return
+    o = sharpe_overall(series, start, end, rf=m.get('rf', 0.0) * 100)
+    m['sharpe_wlog'] = o['Sharpe']
+    m['vol_wlog'] = o['Annualised σ (%)'] / 100
 
 
 def _kpi_table(pm, bm, b_name):
